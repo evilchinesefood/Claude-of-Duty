@@ -34,8 +34,31 @@ export class Input {
     this.down = new Set(); // codes currently held
     this._pressed = new Set(); // went down this frame
     this._released = new Set(); // went up this frame
-    this._pendingDown = new Set();
-    this._pendingUp = new Set();
+
+    /**
+     * Raw DOM transitions in ARRIVAL ORDER, replayed by beginFrame().
+     *
+     * This must be a queue, not a down-Set plus an up-Set: a release and a
+     * re-press of the same code both land inside a single frame gap on any
+     * double-tap (tac-sprint, W tapped while held). Draining "all downs, then
+     * all ups" applies them in the wrong order — the down is swallowed as a
+     * no-op because the code is still held, then the up clears it — and since
+     * `_onKeyDown` filters autorepeat, nothing ever presses the key again. The
+     * key stays marked up while it is physically held, permanently.
+     *
+     * Records are preallocated and reused; the array only grows on a frame that
+     * sees more transitions than any before it, so steady state allocates
+     * nothing (R5).
+     */
+    this._queue = [];
+    this._queueLen = 0;
+    for (let i = 0; i < 64; i++) this._queue.push({ code: '', down: false });
+
+    // tools/demo-driver.js synthesises input by calling `_pendingDown.add(code)`
+    // / `_pendingUp.add(code)`. Those Sets are gone; keep the `.add` shape so the
+    // capture harness keeps working, routed through the ordered queue.
+    this._pendingDown = { add: (code) => this._queueEvent(code, true) };
+    this._pendingUp = { add: (code) => this._queueEvent(code, false) };
 
     /** Accumulated pointer delta for this frame, in radians after sensitivity. */
     this.look = { x: 0, y: 0 };
@@ -101,28 +124,40 @@ export class Input {
     }
   }
 
+  /** Append one transition to the ordered queue, reusing a preallocated record. */
+  _queueEvent(code, down) {
+    // A queue this deep means nothing is draining it — the whole pre-warm accepts
+    // input before the first beginFrame(). Drop the overflow rather than growing
+    // the backing array for the session; blur/beginFrame reconcile the state.
+    if (this._queueLen >= 4096) return;
+    if (this._queueLen === this._queue.length) this._queue.push({ code: '', down: false });
+    const rec = this._queue[this._queueLen++];
+    rec.code = code;
+    rec.down = down;
+  }
+
   _onKeyDown(e) {
     if (!this.enabled) return;
     if (e.repeat) return;
     // Let devtools/refresh through; swallow everything else the game binds.
     if (!e.metaKey && !e.ctrlKey) e.preventDefault();
-    this._pendingDown.add(e.code);
+    this._queueEvent(e.code, true);
   }
 
   _onKeyUp(e) {
     if (!this.enabled) return;
-    this._pendingUp.add(e.code);
+    this._queueEvent(e.code, false);
   }
 
   _onMouseDown(e) {
     if (!this.enabled) return;
     if (!this.pointerLocked && e.button === 0) this.requestPointerLock();
-    this._pendingDown.add(`Mouse${e.button}`);
+    this._queueEvent(`Mouse${e.button}`, true);
   }
 
   _onMouseUp(e) {
     if (!this.enabled) return;
-    this._pendingUp.add(`Mouse${e.button}`);
+    this._queueEvent(`Mouse${e.button}`, false);
   }
 
   _onMouseMove(e) {
@@ -142,9 +177,18 @@ export class Input {
     if (!this.pointerLocked) this._onBlur();
   }
 
-  /** Losing focus must release every held key, or the player runs forever. */
+  /**
+   * Losing focus must release every held key, or the player runs forever.
+   * The releases go through the same queue rather than clearing state out of
+   * band, so they cannot jump ahead of a press that arrived earlier in this
+   * frame gap. Codes queued down but not yet applied get an up too — blur beats
+   * them; a duplicate up is a no-op because `down.delete` fails the second time.
+   */
   _onBlur() {
-    for (const code of this.down) this._pendingUp.add(code);
+    for (const code of this.down) this._queueEvent(code, false);
+    for (let i = 0, n = this._queueLen; i < n; i++) {
+      if (this._queue[i].down) this._queueEvent(this._queue[i].code, false);
+    }
     this._rawLook.x = 0;
     this._rawLook.y = 0;
   }
@@ -153,17 +197,18 @@ export class Input {
     this._pressed.clear();
     this._released.clear();
 
-    for (const code of this._pendingDown) {
-      if (!this.down.has(code)) {
-        this.down.add(code);
-        this._pressed.add(code);
+    for (let i = 0; i < this._queueLen; i++) {
+      const rec = this._queue[i];
+      if (rec.down) {
+        if (!this.down.has(rec.code)) {
+          this.down.add(rec.code);
+          this._pressed.add(rec.code);
+        }
+      } else if (this.down.delete(rec.code)) {
+        this._released.add(rec.code);
       }
     }
-    for (const code of this._pendingUp) {
-      if (this.down.delete(code)) this._released.add(code);
-    }
-    this._pendingDown.clear();
-    this._pendingUp.clear();
+    this._queueLen = 0;
 
     const s = this.config.sensitivity;
     this.look.x = this.frozen ? 0 : this._rawLook.x * s;

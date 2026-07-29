@@ -72,14 +72,45 @@ export class Engine {
     return this;
   }
 
-  async init() {
+  /**
+   * @param onPhase  Called as `(id, done, total)` before each subsystem inits,
+   *   so a boot overlay can name what is being built. Boot is many seconds of
+   *   unbroken main-thread work (world alone is the bulk of it) and without a
+   *   paint between subsystems the page is a black rectangle the whole time —
+   *   which the browser is entitled to kill as unresponsive.
+   */
+  async init(onPhase) {
     const order = this.registry.resolve();
-    for (const sys of order) {
+    // Skipped under `deterministic`: the capture harness measures boot in frames,
+    // and handing frames to the browser mid-init would let the clock advance
+    // between subsystems. Capture already renders to an offscreen page nobody
+    // is watching, so it needs neither the paint nor the overlay.
+    // rAF for a real paint, raced against a timer because a backgrounded tab
+    // throttles or suspends rAF entirely — boot must still finish there.
+    const yieldPaint = this.config.deterministic
+      ? () => Promise.resolve()
+      : () =>
+          new Promise((r) => {
+            let done = false;
+            const fire = () => {
+              if (done) return;
+              done = true;
+              r();
+            };
+            requestAnimationFrame(() => setTimeout(fire, 0));
+            setTimeout(fire, 250);
+          });
+
+    for (let i = 0; i < order.length; i++) {
+      const sys = order[i];
+      onPhase?.(sys.constructor.id, i, order.length);
+      await yieldPaint();
       const t0 = performance.now();
       await sys.init?.(this.ctx);
       const ms = performance.now() - t0;
       if (ms > 50) console.info(`[engine] ${sys.constructor.id} init ${ms.toFixed(0)}ms`);
     }
+    onPhase?.('ready', order.length, order.length);
     this.input.attach();
     addEventListener('resize', this._onResize);
     this.resize();
@@ -119,7 +150,13 @@ export class Engine {
   step(now = performance.now()) {
     const t = this.time;
     // Clamp so a tab-switch or a breakpoint doesn't teleport the simulation.
-    const rawDt = Math.min(0.1, Math.max(0, (now - this._last) / 1000));
+    // The bound is exactly what the substep budget can actually simulate
+    // (MAX_SUBSTEPS x FIXED_DT = 66.7 ms): a looser clamp hands update() and
+    // lateUpdate() more time than fixedUpdate() can consume, so below ~15 fps
+    // the character controller advances at 67-80% of wall-clock while camera
+    // springs, ADS blend, health regen and HUD timers run at 100%.
+    // No effect on capture: src/dev/shots.js pins rawDt to 1/60.
+    const rawDt = Math.min(MAX_SUBSTEPS * FIXED_DT, Math.max(0, (now - this._last) / 1000));
     this._last = now;
     t.raw += rawDt;
     t.dt = rawDt * t.scale;
@@ -136,7 +173,12 @@ export class Engine {
       this._accum -= FIXED_DT;
       steps++;
     }
-    if (steps === MAX_SUBSTEPS) this._accum = 0; // shed backlog rather than spiral
+    // Shed backlog rather than spiral — but only when there IS one. `time.scale`
+    // above 1 can still outrun the budget even with dt clamped. Dropping whole
+    // steps with `%=` keeps the sub-step phase, where `= 0` forced alpha to 0 and
+    // popped every interpolated transform back a full step; and the guard stops
+    // it firing at all when the last step legitimately drained the accumulator.
+    if (steps === MAX_SUBSTEPS && this._accum >= FIXED_DT) this._accum %= FIXED_DT;
     t.alpha = this._accum / FIXED_DT;
 
     for (const sys of this.registry.with('update')) sys.update(t.dt, this.ctx);

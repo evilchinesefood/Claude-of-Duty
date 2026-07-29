@@ -30,7 +30,17 @@
  */
 
 /** Poses chosen to span the level's lighting and material variety, so the
- *  cascades, interiors and exteriors all get their permutations compiled. */
+ *  cascades, interiors and exteriors all get their permutations compiled.
+ *
+ *  ONLY MEANINGFUL WITH `drawFrames`. three r180's `compile()` traverses the
+ *  entire scene graph with no frustum culling and reads the camera only for a
+ *  layers test on lights, so the material set it reaches is camera-independent:
+ *  with `drawFrames` off (the default, and the only path main.js uses) poses
+ *  2-4 compile literally nothing. Measured: 48 programs from pose 1, zero from
+ *  the other three, in exchange for 6 more full-scene traversals (~4,300 object
+ *  visits) plus a hard 10 ms per compileAsync from its `checkMaterialsReady`
+ *  poll wherever KHR_parallel_shader_compile is missing. So the loop below runs
+ *  pose 1 alone unless frames are actually being drawn. */
 const WARM_POSES = [
   { pos: [12, 1.75, 18], look: [-4, 2.2, -6] }, // main street, long cascades
   { pos: [-8.5, 1.7, 3.2], look: [2, 1.6, -2] }, // interior, short cascades
@@ -97,7 +107,10 @@ const SELF_WARMING = new Set(['fx']);
  */
 const RENDER_SHADOW_WARM = false;
 
-export async function prewarm(engine, { onProgress = () => {}, transients = false, drawFrames = false } = {}) {
+export async function prewarm(
+  engine,
+  { onProgress = () => {}, transients = false, drawFrames = false } = {},
+) {
   const t0 = performance.now();
   const render = engine.ctx.peek('render');
   const renderer = render?.renderer;
@@ -162,22 +175,41 @@ export async function prewarm(engine, { onProgress = () => {}, transients = fals
       try {
         renderer.compile(engine.scene, engine.camera);
         renderer.compile(engine.viewScene, engine.viewCamera);
-      } catch { /* nothing more we can do; boot must still proceed */ }
+      } catch {
+        /* nothing more we can do; boot must still proceed */
+      }
     } finally {
       renderer.setRenderTarget(prevRt, prevFace, prevMip);
     }
   };
 
-  const yieldFrame = () => new Promise((r) => requestAnimationFrame(r));
+  // Raced against a timer: a backgrounded or occluded tab throttles rAF to a
+  // crawl or stops it entirely, and boot must not be able to wedge on that.
+  const yieldFrame = () =>
+    new Promise((r) => {
+      let done = false;
+      const fire = () => {
+        if (done) return;
+        done = true;
+        r();
+      };
+      requestAnimationFrame(fire);
+      setTimeout(fire, 250);
+    });
 
   try {
     let step = 0;
-    const totalSteps = WARM_POSES.length * 2 + (transients ? transientStages.length : 0) + 1;
+    // Without drawn frames the extra poses are provably no-ops — see WARM_POSES.
+    const poses = drawFrames ? WARM_POSES : WARM_POSES.slice(0, 1);
+    // `hooks` is built further down, so its count is folded in there. Every
+    // emission goes through `tick` off one counter and one denominator —
+    // hand-rolled fractions here used to make the boot bar run backwards.
+    let totalSteps = poses.length * 2 + (transients ? transientStages.length : 0) + 1;
     const tick = () => onProgress(Math.min(1, ++step / totalSteps));
 
     // Pass 1: compile the static world from each pose, with the depth/shadow
     // variants reached by drawing a real frame at that pose.
-    for (const p of WARM_POSES) {
+    for (const p of poses) {
       cam.position.set(...p.pos);
       cam.lookAt(...p.look);
       cam.updateMatrixWorld(true);
@@ -236,9 +268,19 @@ export async function prewarm(engine, { onProgress = () => {}, transients = fals
       if (SELF_WARMING.has(sys.constructor?.id)) continue;
       if (typeof sys.prewarmMaterials === 'function') hooks.push(sys);
     }
+    totalSteps += hooks.length;
     const hookResults = {};
-    for (const sys of hooks) {
+    for (let i = 0; i < hooks.length; i++) {
+      const sys = hooks[i];
       const id = sys.constructor?.id ?? '?';
+      // Yield a real frame between hooks. Where KHR_parallel_shader_compile is
+      // absent — most Intel/Mesa drivers — `compileAsync` degrades to a fully
+      // blocking `compile()`, so these hooks are hundreds of ms each with no
+      // natural suspension point. Without a paint in between, the whole pre-warm
+      // is one unresponsive block and the browser is entitled to kill the tab.
+      // Nothing here reads the clock, so yielding cannot move a pixel.
+      await yieldFrame();
+      tick();
       try {
         const arg = sys === renderSys ? { post: true, shadow: RENDER_SHADOW_WARM } : engine.ctx;
         hookResults[id] = (await sys.prewarmMaterials(arg)) ?? { ok: true };
@@ -251,8 +293,12 @@ export async function prewarm(engine, { onProgress = () => {}, transients = fals
 
     // Pass 2: spawn each subsystem's transient objects and compile those too.
     // Gated: see the `transients` option doc — this pass is not pixel-transparent.
-    for (const spawn of (transients ? transientStages : [])) {
-      try { spawn(); } catch { /* subsystem may not implement the hook */ }
+    for (const spawn of transients ? transientStages : []) {
+      try {
+        spawn();
+      } catch {
+        /* subsystem may not implement the hook */
+      }
       engine.step();
       await yieldFrame();
       await compile();
@@ -263,13 +309,19 @@ export async function prewarm(engine, { onProgress = () => {}, transients = fals
     tick();
   } finally {
     // Restore exactly what we found. Any residue here would be a visual change.
-    for (const reset of (transients ? [
-      () => engine.ctx.peek('fx')?.debugBurst?.('none'),
-      () => engine.ctx.peek('weapons')?.debugPose?.('idle'),
-      () => engine.ctx.peek('ui')?.debugState?.('clean'),
-      () => engine.ctx.peek('ai')?.debugStage?.('none'),
-    ] : [])) {
-      try { reset(); } catch { /* optional hook */ }
+    for (const reset of transients
+      ? [
+          () => engine.ctx.peek('fx')?.debugBurst?.('none'),
+          () => engine.ctx.peek('weapons')?.debugPose?.('idle'),
+          () => engine.ctx.peek('ui')?.debugState?.('clean'),
+          () => engine.ctx.peek('ai')?.debugStage?.('none'),
+        ]
+      : []) {
+      try {
+        reset();
+      } catch {
+        /* optional hook */
+      }
     }
     cam.position.copy(saved.pos);
     cam.quaternion.copy(saved.quat);

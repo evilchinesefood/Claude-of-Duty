@@ -85,9 +85,21 @@ export class Registry {
 /** Minimal typed event bus. Handlers are called synchronously. */
 export class EventBus {
   #map = new Map();
+  /**
+   * Array mirror of each handler Set, rebuilt lazily and invalidated by on()/off().
+   * emit() used to spread the Set into a fresh array every dispatch so handlers
+   * could unsubscribe mid-dispatch; that allocated on the gameplay hot path
+   * (weapon:fire / weapon:shell / bullet:tracer / bullet:impact / damage:dealt,
+   * per shot, per shooter). Subscriptions only change at init and dispose, so the
+   * mirror is built once and emit() allocates nothing.
+   */
+  #lists = new Map();
 
   on(type, fn) {
-    (this.#map.get(type) ?? this.#map.set(type, new Set()).get(type)).add(fn);
+    let set = this.#map.get(type);
+    if (!set) this.#map.set(type, (set = new Set()));
+    set.add(fn);
+    this.#lists.delete(type);
     return () => this.off(type, fn);
   }
 
@@ -100,16 +112,20 @@ export class EventBus {
   }
 
   off(type, fn) {
-    this.#map.get(type)?.delete(fn);
+    if (this.#map.get(type)?.delete(fn)) this.#lists.delete(type);
   }
 
   emit(type, payload) {
     const set = this.#map.get(type);
-    if (!set) return;
-    // Copy so handlers may unsubscribe during dispatch.
-    for (const fn of [...set]) {
+    if (!set || set.size === 0) return;
+    let list = this.#lists.get(type);
+    if (!list) this.#lists.set(type, (list = [...set]));
+    // `list` is a snapshot held in a local: a handler that calls on()/off()
+    // during dispatch drops the cached mirror, but this loop keeps walking the
+    // array it started with — same semantics the old `[...set]` copy had.
+    for (let i = 0; i < list.length; i++) {
       try {
-        fn(payload);
+        list[i](payload);
       } catch (err) {
         console.error(`[events] handler for "${type}" threw:`, err);
       }
@@ -118,5 +134,6 @@ export class EventBus {
 
   clear() {
     this.#map.clear();
+    this.#lists.clear();
   }
 }
