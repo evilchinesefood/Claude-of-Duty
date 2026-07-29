@@ -53,11 +53,18 @@ export function setText(node, value) {
   }
 }
 
-/** Write any style property only on change. */
+/**
+ * Write any style property only on change.
+ *
+ * The cache lives in a per-node null-prototype object keyed on `prop` directly.
+ * A `'_ows_' + prop` key would cons a fresh string on every call — ~97 call
+ * sites, several inside per-element loops — and force V8 to internalise it
+ * before the read, even when the value is unchanged and nothing is written.
+ */
 export function setStyle(node, prop, value) {
-  const key = '_ows_' + prop;
-  if (node[key] !== value) {
-    node[key] = value;
+  const c = node._ows ?? (node._ows = Object.create(null));
+  if (c[prop] !== value) {
+    c[prop] = value;
     node.style.setProperty(prop, value);
   }
 }

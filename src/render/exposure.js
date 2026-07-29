@@ -171,7 +171,12 @@ export class AutoExposure {
     lu.tSrc.value = sourceTexture;
     lu.tDepth.value = depthTexture ?? null;
     lu.uMeter.value.w = depthTexture ? 1 : 0;
-    lu.uTexel.value.set(1 / sw, 1 / sh);
+    // Stratify the four taps across the DESTINATION texel instead of a 3x3
+    // source-pixel cluster. rt64 is 64x64, so +-1/256 UV puts one tap in each
+    // quadrant of the cell a 45x25-pixel source region maps to; spaced one
+    // source texel apart they were near-duplicates. Same four fetches, ~4x less
+    // per-cell variance. Never sample tighter than one source texel.
+    lu.uTexel.value.set(Math.max(1 / sw, 1 / 256), Math.max(1 / sh, 1 / 256));
     this.logPass.render(renderer, this.rt64);
 
     const ru = this.reducePass.uniforms;

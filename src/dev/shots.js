@@ -231,8 +231,15 @@ export function installShotApi(engine, { capture, lockstep = false } = {}) {
       requestAnimationFrame(tick);
     });
     window.__PRESENT__ = window.__PUMP__;
-    const info = () => { snapInfo(); requestAnimationFrame(info); };
-    requestAnimationFrame(info);
+    // The telemetry chain is load-bearing for `?capture=1` without lockstep —
+    // the driver reads __RENDER_INFO__ between shots — but nothing in the game
+    // does, so in a normal session it was a second rAF loop running for the life
+    // of the page, allocating a 7-property object per frame that no shipped code
+    // reads and that engine.dispose() has no handle on. Gate it on `capture`.
+    if (capture) {
+      const info = () => { snapInfo(); requestAnimationFrame(info); };
+      requestAnimationFrame(info);
+    }
   }
 
   return { pump: window.__PUMP__, present: window.__PRESENT__, lockstep: !!lockstep };

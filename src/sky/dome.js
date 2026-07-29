@@ -12,10 +12,15 @@ import { fullScreenGeometry, SKY_VERT } from './fullscreen.js';
 /**
  * The visible sky.
  *
- * Drawn as a full-screen triangle at renderOrder -10000 with depth test and
- * depth write off, exactly the way `scene.background` works internally — so it
- * fills the frame before any geometry and costs one primitive. The ray
- * direction is rebuilt from `camera.projectionMatrixInverse` inside
+ * Drawn as a full-screen triangle whose vertex shader emits z == w, i.e. depth
+ * exactly 1.0 — the far plane — and costs one primitive. Depth WRITE is off but
+ * depth TEST is on, and it sorts after the opaque world (renderOrder 9000)
+ * rather than before it: the pixels early-Z now rejects are precisely the ones
+ * geometry would have overdrawn, and the material is NoBlending, so the output
+ * is identical while the heaviest fragment program in the frame stops shading
+ * the 60-85% of a street frame that geometry covers.
+ *
+ * The ray direction is rebuilt from `camera.projectionMatrixInverse` inside
  * `onBeforeRender`, which means it picks up the renderer's TAA jitter and the
  * sun disc gets properly resolved sub-pixel antialiasing instead of stair steps.
  *
@@ -332,7 +337,10 @@ export class SkyDome {
       fragmentShader: DOME_FRAG,
       glslVersion: THREE.GLSL3,
       side: THREE.DoubleSide,
-      depthTest: false,
+      // LessEqualDepth against a buffer cleared to 1.0: passes where nothing was
+      // written, fails wherever geometry wrote depth < 1. Never write depth —
+      // the far plane must stay available to whatever sorts after us.
+      depthTest: true,
       depthWrite: false,
       blending: THREE.NoBlending,
       fog: false,
@@ -342,7 +350,11 @@ export class SkyDome {
     this.mesh = new THREE.Mesh(fullScreenGeometry(), this.material);
     this.mesh.name = 'sky-dome';
     this.mesh.frustumCulled = false;
-    this.mesh.renderOrder = -10000;
+    // Last in the opaque queue, so every opaque fragment has already written
+    // depth by the time we run. Three always flushes the whole opaque list
+    // before the transparent one, so this cannot sort over decals, particles or
+    // the contact-shadow quads whatever their renderOrder.
+    this.mesh.renderOrder = 9000;
     this.mesh.matrixAutoUpdate = false;
     // Render contract: stay out of the prepass, the cascades and contact shadows.
     this.mesh.userData.owNoPrepass = true;

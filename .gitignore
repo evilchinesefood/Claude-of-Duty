@@ -2,6 +2,7 @@ node_modules/
 
 # Build output
 dist/
+dist-map/
 playable-snapshot/
 perf-candidate/
 perf-cand2/
@@ -10,6 +11,7 @@ perf-cand2/
 shots/
 
 # Agent scratch
+.omc/
 demo/
 .tmp-demo/
 .tmp-rend/

@@ -13,7 +13,14 @@ export default defineConfig({
     hmr: process.env.OW_NO_HMR ? false : undefined,
   },
   preview: { host: '127.0.0.1' },
-  build: { target: 'es2022', sourcemap: true, chunkSizeWarningLimit: 4096 },
+  // Sourcemaps are opt-in (`OW_SOURCEMAP=1 npm run build`): the map is 6.6 MB
+  // against a 1.6 MB chunk and carries sourcesContent for the whole tree, so a
+  // plain `npm run build` should not be publishing it.
+  build: {
+    target: 'es2022',
+    sourcemap: !['', '0', 'false', undefined].includes(process.env.OW_SOURCEMAP),
+    chunkSizeWarningLimit: 4096,
+  },
   // Large binary game assets served verbatim.
   assetsInclude: ['**/*.ktx2', '**/*.hdr', '**/*.exr', '**/*.bin', '**/*.glb'],
 });

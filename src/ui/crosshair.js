@@ -29,6 +29,20 @@ export class Crosshair {
 
     // preallocated transform scratch — string concat only, no objects
     this._rot = [0, 90, 180, 270];
+
+    // Last emitted strings plus the quantised integers they were built from.
+    // gap/len/opacity are all damped, so they converge and then sit still;
+    // rebuilding only when the quantised value moves makes the steady state
+    // allocation-free instead of ~20 strings/frame. NaN forces the first build.
+    this._xf = ['', '', '', ''];
+    this._bladeOpacity = '';
+    this._dotXf = '';
+    this._dotOpacity = '';
+    this._qGap = NaN;
+    this._qLen = NaN;
+    this._qBladeOpacity = NaN;
+    this._qDotScale = NaN;
+    this._qDotOpacity = NaN;
   }
 
   /** Called on every shot. `amount` scales with weapon recoil. */
@@ -79,18 +93,45 @@ export class Crosshair {
     const vis = this.visible;
 
     const bright = 1 - 0.25 * this.adsBlend + 0.5 * ease.outQuad(this.hitPulse);
+
+    // Quantise to exactly the precision the format emits, then build the string
+    // back out of that integer — guard and output stay in 1:1 correspondence, so
+    // a value that only jitters below the printed digit can never emit a
+    // different transform. Math.round, not `| 0`: truncation disagrees with
+    // toFixed at a boundary and would shift the reticle by a printed digit.
+    const qGap = Math.round(gap * 100);
+    const qLen = Math.round(len * 1000);
+    if (qGap !== this._qGap || qLen !== this._qLen) {
+      this._qGap = qGap;
+      this._qLen = qLen;
+      const g = (qGap / 100).toFixed(2);
+      const l = (qLen / 1000).toFixed(3);
+      const tail = `deg) translateY(${-g}px) scaleY(${l})`;
+      for (let i = 0; i < 4; i++) this._xf[i] = 'rotate(' + this._rot[i] + tail;
+    }
+    const qBladeOpacity = Math.round(vis * Math.min(1, bright) * 1000);
+    if (qBladeOpacity !== this._qBladeOpacity) {
+      this._qBladeOpacity = qBladeOpacity;
+      this._bladeOpacity = (qBladeOpacity / 1000).toFixed(3);
+    }
     for (let i = 0; i < 4; i++) {
       const b = this.blades[i];
-      setStyle(
-        b,
-        'transform',
-        `rotate(${this._rot[i]}deg) translateY(${-gap.toFixed(2)}px) scaleY(${len.toFixed(3)})`
-      );
-      setStyle(b, 'opacity', (vis * Math.min(1, bright)).toFixed(3));
+      setStyle(b, 'transform', this._xf[i]);
+      setStyle(b, 'opacity', this._bladeOpacity);
     }
-    const dotScale = 1 + this.hitPulse * 1.1;
-    setStyle(this.dot, 'transform', `scale(${dotScale.toFixed(3)})`);
-    setStyle(this.dot, 'opacity', (vis * (0.85 + 0.15 * this.hitPulse)).toFixed(3));
+
+    const qDotScale = Math.round((1 + this.hitPulse * 1.1) * 1000);
+    if (qDotScale !== this._qDotScale) {
+      this._qDotScale = qDotScale;
+      this._dotXf = `scale(${(qDotScale / 1000).toFixed(3)})`;
+    }
+    setStyle(this.dot, 'transform', this._dotXf);
+    const qDotOpacity = Math.round(vis * (0.85 + 0.15 * this.hitPulse) * 1000);
+    if (qDotOpacity !== this._qDotOpacity) {
+      this._qDotOpacity = qDotOpacity;
+      this._dotOpacity = (qDotOpacity / 1000).toFixed(3);
+    }
+    setStyle(this.dot, 'opacity', this._dotOpacity);
     setStyle(this.root, 'display', vis < 0.004 ? 'none' : '');
   }
 
