@@ -17,6 +17,13 @@ npm run dev          # http://127.0.0.1:5173
 Click the canvas to lock the cursor. WASD move, mouse aim, LMB fire, RMB ADS,
 R reload, Shift sprint, Ctrl crouch, Space jump, Q/E lean, Esc release.
 
+The quality preset is chosen from your GPU at boot — software rasterisers and
+mobile parts get `low`, integrated graphics `low`/`medium`, discrete `high`.
+Override with `?q=low|medium|high|ultra`. **`ultra` is opt-in on purpose:** at
+1080p it reserves roughly 600 MB of render targets before a triangle is drawn,
+which is enough to get the GPU process killed on integrated graphics — the
+browser reports that as a tab crash, not as an error the page can catch.
+
 ## What's in it
 
 | subsystem | what it does |
