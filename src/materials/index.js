@@ -53,6 +53,14 @@ export class MaterialSystem {
     const q = ctx?.config?.q;
     this._anisotropy = q?.anisotropy ?? 8;
     // Texture budget scales with the quality preset; 1K is the reference.
+    //
+    // Captured once, deliberately: re-reading it later would not help, because
+    // nothing re-bakes. `config.setQuality()` (src/ui/menu.js:137) updates
+    // `config.q` and emits `ui:quality`, which has NO listeners — so changing
+    // quality from the pause menu leaves every already-baked set at its boot
+    // resolution and frees nothing. `detectQuality()` and `?q=` both run before
+    // init, so the budget below is correct for them; the in-game menu is a
+    // known gap that needs a re-bake + dispose path, not just a fresher read.
     this._quality =
       ctx?.config?.quality === 'low' ? 0.5 : ctx?.config?.quality === 'medium' ? 0.75 : 1;
     this._tryBuild();
@@ -77,8 +85,13 @@ export class MaterialSystem {
     }
     const t0 = performance.now();
     this._forge = new TextureForge(renderer, { anisotropy: this._anisotropy });
-    // 1K, not 512: the micro tooth is 1.6-4 mm over a 0.25 m tile, which needs
-    // ~6 texels per grain to survive mip 1 instead of averaging to flat grey.
+    // 1K, not 512, as the BASE: the micro tooth is 1.6-4 mm over a 0.25 m tile,
+    // which needs ~6 texels per grain to survive mip 1 instead of averaging to
+    // flat grey. `_size` then scales that base with the preset, so low and
+    // medium do land on 512 (~3 texels/grain) — the grain goes soft there rather
+    // than disappearing, and it is the same trade every other surface makes on
+    // those tiers. This is the one map where it is worth knowing, because it is
+    // shared by every material rather than covering one surface.
     const detail = this._forge.buildDetail(this._size(1024));
     const macro = this._forge.buildMacro(256);
     this._shared = {
@@ -92,10 +105,26 @@ export class MaterialSystem {
     return true;
   }
 
+  /**
+   * Scale a bake resolution by the quality preset, snapped to a power of two so
+   * mip chains stay clean.
+   *
+   * FLOOR, not round. Rounding made `medium`'s 0.75 a no-op: 1024*0.75 = 768
+   * rounds back up to 1024 and 512*0.75 = 384 rounds back up to 512, so every
+   * bake came out at full size and the preset allocated the same 304 MiB of
+   * texture as `high` and `ultra`. That is the preset `detectQuality()` sends
+   * integrated graphics to (see src/core/config.js) — the one hardware class
+   * that cannot afford it, and the one whose symptom is the GPU process being
+   * killed rather than a catchable error.
+   *
+   * Flooring costs `medium` one mip level of surface detail and takes the
+   * texture budget to 76 MiB. `high` and `ultra` run at _quality = 1, where a
+   * power-of-two base is returned unchanged, so they are byte-identical and the
+   * `ultra` pixel gate is unaffected.
+   */
   _size(base) {
-    const s = Math.max(128, Math.round((base * this._quality) / 128) * 128);
-    // keep it a power of two so mip chains stay clean
-    return 1 << Math.round(Math.log2(s));
+    const scaled = Math.max(128, base * this._quality);
+    return Math.max(128, 1 << Math.floor(Math.log2(scaled)));
   }
 
   /**
