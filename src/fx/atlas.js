@@ -778,6 +778,14 @@ function makeTexture(data, size, { srgb, mips = true, name }) {
   t.anisotropy = 4;
   t.name = name;
   t.needsUpdate = true;
+  // Release the source buffer to the GC once uploaded — 16 MiB of JS heap at
+  // 1024 that three would otherwise pin on `image.data` for the session. These
+  // atlases are baked once and never re-uploaded. See the same note in
+  // src/ai/textures.js for the context-loss caveat.
+  t.onUpdate = (tex) => {
+    tex.image.data = null;
+    tex.onUpdate = null;
+  };
   return t;
 }
 

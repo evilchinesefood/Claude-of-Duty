@@ -104,6 +104,19 @@ function dataTexture(buf, size, srgbSpace, aniso) {
   t.magFilter = THREE.LinearFilter;
   t.anisotropy = aniso;
   t.needsUpdate = true;
+  // Hand the source buffer back to the GC once the GPU has it. three keeps
+  // `image.data` alive forever otherwise, and none of these are ever re-uploaded
+  // — 29 MiB of JS heap held for the whole session, on top of the GPU copy.
+  // three r180 fires this immediately after the upload (three.module.js:11424).
+  //
+  // Safe only because a lost context is terminal here: main.js stops the engine
+  // and shows the reload prompt, and there is no `webglcontextrestored` handler
+  // anywhere in src/. If one is ever added it will need the source data back, so
+  // it has to keep these buffers (or re-bake) rather than just re-uploading.
+  t.onUpdate = (tex) => {
+    tex.image.data = null;
+    tex.onUpdate = null;
+  };
   return t;
 }
 
