@@ -495,7 +495,16 @@ export class UiSystem {
 
     // ---- pause -----------------------------------------------------------
     if (ctx.input.enabled && !ctx.input.frozen) {
-      if (ctx.input.actionPressed('pause')) this.menu.toggle();
+      if (ctx.input.actionPressed('pause')) {
+        this.menu.toggle();
+        // Escape does two things at once when the pointer is locked: the
+        // browser exits the lock itself AND the keydown still reaches us. The
+        // latch below is for a lock we lost for some OTHER reason, so an
+        // acknowledged pause key spends it — otherwise closing the menu with
+        // Escape set `open = false` and the auto-show two lines down reopened
+        // it in the same frame, which read as "the menu never goes away".
+        this._hadPointerLock = false;
+      }
       // Losing pointer lock mid-match is the same intent as pressing Escape.
       if (ctx.input.pointerLocked) this._hadPointerLock = true;
       else if (this._hadPointerLock && !this.menu.open) {
