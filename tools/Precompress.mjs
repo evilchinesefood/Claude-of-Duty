@@ -26,8 +26,17 @@ const br = promisify(brotliCompress);
 const gz = promisify(gzip);
 
 const COMPRESSIBLE = new Set(['.js', '.mjs', '.css', '.html', '.json', '.svg', '.map', '.wasm']);
-/** Below this, the request overhead dwarfs the saving and Apache's own gzip is fine. */
-const MIN_BYTES = 1024;
+/**
+ * Below this, the saving is not worth an extra file on disk.
+ *
+ * Was 1024, which silently skipped the one file that is never cached: index.html
+ * is ~800 B, so it got no siblings at all and fell back to mod_deflate on the fly
+ * — the only asset still paying for per-request compression, on every single
+ * load, because it is served `no-cache`. 256 is low enough to catch it and still
+ * high enough that a tiny file where the deflate header outweighs the payload is
+ * left alone (the `smaller than the original` test below is the real backstop).
+ */
+const MIN_BYTES = 256;
 
 const kb = (b) => `${(b / 1024).toFixed(1)} kB`;
 const pct = (part, whole) => (whole ? `${((1 - part / whole) * 100).toFixed(1)}% off` : '—');

@@ -34,15 +34,45 @@
     # brotli (some corporate proxies send exactly that), and it contains the
     # token, so matching on the token alone hands those clients a body they have
     # told us they cannot decode. q=0 and q=0.0 are refusals; q=0.5 is not.
-    RewriteCond %{HTTP:Accept-Encoding} (^|[,\s])br(\s*[,;]|$)
-    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])br\s*;\s*q=0(\.0+)?(\s*[,;]|$)
+    # [NC] on BOTH conditions, never just the first. Content codings are
+    # case-insensitive per RFC 9110, but a case-insensitive positive test paired
+    # with a case-sensitive refusal test is worse than no [NC] at all: `BR;Q=0`
+    # would match the token and slip past the refusal, handing brotli to a client
+    # that explicitly refused it. Without [NC] anywhere the only cost is a missed
+    # optimisation, which is why this was safe before — it is not safe halfway.
+    RewriteCond %{HTTP:Accept-Encoding} (^|[,\s])br(\s*[,;]|$) [NC]
+    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])br\s*;\s*q=0(\.0+)?(\s*[,;]|$) [NC]
+    RewriteCond %{REQUEST_FILENAME}.br -f
+    RewriteRule ^(.+\.(?:js|mjs|css|html|json|svg|map|wasm))$ $1.br [L]
+
+    # `Accept-Encoding: *` is "anything is acceptable". No browser sends it, but
+    # a client that does was being handed the full 1.6 MB identity body.
+    #
+    # This is a separate block rather than an extra alternative in the token test
+    # above, because `*` only licenses brotli when brotli was NOT named
+    # explicitly. The two headers that force the distinction:
+    #   `*;q=0, br`  — wildcard refused, br still explicitly wanted  -> serve br
+    #   `*, br;q=0`  — wildcard fine, but br explicitly refused      -> NOT br
+    # Folding `*` into the positive test would get the second one wrong, which is
+    # the same class of bug as matching the `br` inside `br;q=0`.
+    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])br(\s*[,;]|$) [NC]
+    RewriteCond %{HTTP:Accept-Encoding} (^|[,\s])\*(\s*[,;]|$)
+    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])\*\s*;\s*q=0(\.0+)?(\s*[,;]|$)
     RewriteCond %{REQUEST_FILENAME}.br -f
     RewriteRule ^(.+\.(?:js|mjs|css|html|json|svg|map|wasm))$ $1.br [L]
 
     # gzip fallback, for the same reason: serving a stored -9 file beats
     # re-running mod_deflate at its default level on every request.
-    RewriteCond %{HTTP:Accept-Encoding} (^|[,\s])gzip(\s*[,;]|$)
-    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])gzip\s*;\s*q=0(\.0+)?(\s*[,;]|$)
+    RewriteCond %{HTTP:Accept-Encoding} (^|[,\s])gzip(\s*[,;]|$) [NC]
+    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])gzip\s*;\s*q=0(\.0+)?(\s*[,;]|$) [NC]
+    RewriteCond %{REQUEST_FILENAME}.gz -f
+    RewriteRule ^(.+\.(?:js|mjs|css|html|json|svg|map|wasm))$ $1.gz [L]
+
+    # Wildcard gzip, same reasoning as the wildcard brotli block. Reached only
+    # when there is no .br sibling, since the block above already claimed `*`.
+    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])gzip(\s*[,;]|$) [NC]
+    RewriteCond %{HTTP:Accept-Encoding} (^|[,\s])\*(\s*[,;]|$)
+    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])\*\s*;\s*q=0(\.0+)?(\s*[,;]|$)
     RewriteCond %{REQUEST_FILENAME}.gz -f
     RewriteRule ^(.+\.(?:js|mjs|css|html|json|svg|map|wasm))$ $1.gz [L]
   </IfModule>
