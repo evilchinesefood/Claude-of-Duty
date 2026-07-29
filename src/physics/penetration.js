@@ -23,6 +23,8 @@ const MAX_LAYERS = 6;
 const EXIT_PROBE = 1.6;
 /** Assumed thickness of single-sided geometry, metres. */
 const SHEET_THICKNESS = 0.018;
+/** Probe raycasts spent walking one solid; bounds a body's stacked hitboxes. */
+const MAX_PROBE_STEPS = 8;
 
 export class Ballistics {
   constructor(phys) {
@@ -53,6 +55,8 @@ export class Ballistics {
    *   penetration budget, 1.0 = 7.62 rifle, 0.35 = pistol, 2.2 = .50 / AP
    *   mask        collision mask (default MASK.BULLET)
    *   dropoff     damage retained at maxDist, 0..1
+   *   source      who fired; forwarded on `damage:dealt` so credit and range
+   *               falloff are measured from the shooter, not from the player
    * @returns {number} number of impacts written into `this.impacts`
    */
   fire(o) {
@@ -71,11 +75,25 @@ export class Ballistics {
     const startX = ox, startY = oy, startZ = oz;
     const emit = o.emit !== false;
 
+    const source = o.source ?? null;
+
     this.impactCount = 0;
+    // Exactly one `damage:dealt` per actor per round. Hitboxes overlap (an arm
+    // capsule sits inside the torso) and a body is thicker than one layer, so
+    // without this a single round can re-enter the same actor and damage it
+    // again a few millimetres later.
+    const struck = this._struck ?? (this._struck = []);
+    struck.length = 0;
 
     for (let layer = 0; layer < MAX_LAYERS && remaining > 0.01; layer++) {
       const hit = phys.raycast(ox, oy, oz, dx, dy, dz, remaining, mask);
       if (!hit.hit) break;
+
+      let deal = true;
+      if (hit.actor) {
+        deal = struck.indexOf(hit.actor) < 0;
+        if (deal) struck.push(hit.actor);
+      }
 
       const travelled = Math.hypot(hit.point.x - startX, hit.point.y - startY, hit.point.z - startZ);
       // Muzzle-to-target energy loss.
@@ -91,7 +109,7 @@ export class Ballistics {
           hit.point.x, hit.point.y, hit.point.z,
           hit.normal.x, hit.normal.y, hit.normal.z,
           dx, dy, dz,
-          si, damage * rangeMul, false, hit
+          si, damage * rangeMul, false, hit, source, deal
         );
       }
 
@@ -128,7 +146,7 @@ export class Ballistics {
           thick.point.x, thick.point.y, thick.point.z,
           thick.normal.x, thick.normal.y, thick.normal.z,
           dx, dy, dz,
-          si, exDamage, true, hit
+          si, exDamage, true, hit, source
         );
       }
 
@@ -175,9 +193,6 @@ export class Ballistics {
   _measureThickness(entry, dx, dy, dz, mask, probe) {
     const phys = this.phys;
     const eps = 0.0015;
-    const ox = entry.point.x + dx * eps;
-    const oy = entry.point.y + dy * eps;
-    const oz = entry.point.z + dz * eps;
     const out = this._thick ?? (this._thick = {
       distance: 0,
       point: { x: 0, y: 0, z: 0 },
@@ -185,17 +200,78 @@ export class Ballistics {
       backface: false,
     });
 
-    const h = phys.raycast(ox, oy, oz, dx, dy, dz, probe, mask);
-    const sameSolid =
-      h.hit && !h.frontFace &&
-      (h.object === entry.object || h.collider === entry.collider);
+    // Analytic shapes have no winding to report: `frontFace` stays true for a
+    // collider capsule and is never written for a ragdoll bone, so demanding a
+    // backface here sent every actor down the sheet branch and stepped the ray
+    // 18 mm — still inside the body it just entered, which is what made one
+    // round deal its damage twice. Identity is what tells us we are still in
+    // the thing we entered, and a body is ONE solid: an actor's hitboxes
+    // overlap (an arm capsule sits inside the torso), so keep walking while the
+    // probe stays on the same actor and take the LAST crossing as the exit.
+    // Consequence, deliberate: the exit is the far side of the WHOLE body, so a
+    // torso now costs ~0.37-0.44 m of the flesh budget instead of 18 mm, and an
+    // intra-body air gap (an outstretched arm) is charged as thickness. A round
+    // can therefore stop inside an actor where it previously always exited.
+    // A rigid body is convex and analytic, but rayObb/raySphere report t = 0 for
+    // a ray that starts inside it, so the forward walk below cannot find its far
+    // face — every debris crate was measured as an 18 mm sheet and re-entered
+    // half a dozen times, one entry+exit impact pair each. Probe backwards from
+    // just beyond the body instead: for a convex shape that lands exactly on the
+    // exit face, and raycast() already reports the normal facing the probe ray,
+    // which for a backwards ray is the outward normal we want.
+    if (entry.body) {
+      const b = entry.body;
+      const br =
+        b.shape === 'sphere' ? b.radius
+        : b.shape === 'capsule' ? b.halfHeight + b.radius
+        : Math.hypot(b.hx, b.hy, b.hz);
+      const span = br * 2 + eps;
+      if (span <= probe) {
+        const back = phys.raycast(
+          entry.point.x + dx * span, entry.point.y + dy * span, entry.point.z + dz * span,
+          -dx, -dy, -dz, span, mask
+        );
+        if (back.hit && back.body === b) {
+          out.distance = Math.max(eps, span - back.distance);
+          out.point.x = back.point.x; out.point.y = back.point.y; out.point.z = back.point.z;
+          out.normal.x = back.normal.x; out.normal.y = back.normal.y; out.normal.z = back.normal.z;
+          out.backface = true;
+          return out;
+        }
+      }
+    }
 
-    if (sameSolid) {
-      out.distance = h.distance + eps;
-      out.point.x = h.point.x; out.point.y = h.point.y; out.point.z = h.point.z;
+    let ox = entry.point.x + dx * eps;
+    let oy = entry.point.y + dy * eps;
+    let oz = entry.point.z + dz * eps;
+    let travelled = eps;
+    let ex = 0, ey = 0, ez = 0, enx = 0, eny = 0, enz = 0;
+    let found = false;
+
+    for (let step = 0; step < MAX_PROBE_STEPS && travelled < probe; step++) {
+      const h = phys.raycast(ox, oy, oz, dx, dy, dz, probe - travelled, mask);
+      if (!h.hit) break;
+      const same =
+        (entry.collider && h.collider === entry.collider) ||
+        (entry.ragdoll && h.ragdoll === entry.ragdoll) ||
+        (entry.actor && h.actor === entry.actor) ||
+        (!h.frontFace && h.object === entry.object);
+      if (!same) break;
+      travelled += h.distance;
+      ex = h.point.x; ey = h.point.y; ez = h.point.z;
       // raycast() reports normals facing the shooter; the exit face's outward
       // normal is the opposite.
-      out.normal.x = -h.normal.x; out.normal.y = -h.normal.y; out.normal.z = -h.normal.z;
+      enx = -h.normal.x; eny = -h.normal.y; enz = -h.normal.z;
+      found = true;
+      if (h.triangle >= 0) break; // a mesh backface is the real exit
+      ox = ex + dx * eps; oy = ey + dy * eps; oz = ez + dz * eps;
+      travelled += eps;
+    }
+
+    if (found) {
+      out.distance = travelled;
+      out.point.x = ex; out.point.y = ey; out.point.z = ez;
+      out.normal.x = enx; out.normal.y = eny; out.normal.z = enz;
       out.backface = true;
     } else {
       // Single-sided sheet: nominal thickness along the incidence angle.

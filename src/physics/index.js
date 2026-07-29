@@ -39,7 +39,7 @@
  *   c.teleport(x,y,z)  c.landingSpeed  c.steppedUp  c.lastMoveBlocked
  *
  * BALLISTICS  (weapons)
- *   fireBullet({origin, dir, damage, penetration, maxDist, mask, rng}) -> impacts[]
+ *   fireBullet({origin, dir, damage, penetration, maxDist, mask, rng, source}) -> impacts[]
  *   emits `bullet:impact` on entry AND exit of every layer.
  *   explode({position, radius, damage, impulse})
  *
@@ -243,7 +243,6 @@ export class PhysicsSystem {
     this.ctx = ctx;
     this.rng = ctx.rng.fork();
     this.ballistics.rng = this.rng;
-    this.debug = new PhysicsDebugView(ctx.scene);
 
     this._onExplosion = (e) => this.explode(e);
     this._onDeath = (e) => this._handleDeath(e);
@@ -546,6 +545,10 @@ export class PhysicsSystem {
       out.body = b;
       out.collider = null;
       out.ragdoll = null;
+      // A rigid body carries no actor. Leaving these set meant a debris box in
+      // front of an enemy inherited his identity and dealt him the damage.
+      out.actor = null;
+      out.part = null;
       out.triangle = -1;
     }
     return best;
@@ -713,7 +716,7 @@ export class PhysicsSystem {
     return res;
   }
 
-  emitImpact(px, py, pz, nx, ny, nz, dx, dy, dz, si, damage, exit, hit) {
+  emitImpact(px, py, pz, nx, ny, nz, dx, dy, dz, si, damage, exit, hit, source = null, deal = true) {
     const p = this._impactPool[this._impactCursor];
     this._impactCursor = (this._impactCursor + 1) % IMPACT_POOL;
     p.point.set(px, py, pz);
@@ -729,13 +732,17 @@ export class PhysicsSystem {
     p.part = hit?.part ?? null;
     this.ctx.events.emit('bullet:impact', p);
 
-    if (p.actor && !exit) {
+    // Entry faces only, once per actor per round (`deal`), and never a corpse:
+    // a ragdoll still carries the dead Agent, so without the guard every round
+    // into a body drew a fresh hitmarker and damage number.
+    if (p.actor && !exit && deal && !hit?.ragdoll && p.actor.alive !== false) {
       this.ctx.events.emit('damage:dealt', {
         target: p.actor,
         amount: damage * (hit?.collider?.damageScale ?? 1),
         headshot: hit?.part === 'head',
         killed: false,
         point: p.point,
+        source,
       });
     }
   }
@@ -976,6 +983,9 @@ export class PhysicsSystem {
    *   phys.setDebugDraw(true, { nodes: true, radius: 25 })
    */
   setDebugDraw(on, opts = {}) {
+    // Built on demand: the view holds 2.9 MB of line buffers for a wireframe
+    // that only ?physdebug=1 and the dev overlays ever switch on.
+    if (on && !this.debug && this.ctx) this.debug = new PhysicsDebugView(this.ctx.scene);
     if (!this.debug) return;
     if (opts.triangles !== undefined) this.debug.showTriangles = opts.triangles;
     if (opts.nodes !== undefined) this.debug.showNodes = opts.nodes;

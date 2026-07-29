@@ -468,8 +468,8 @@ section('Hitbox colliders');
   const behind = phys.raycast(0, 1.65, 0, 1, 0, 0, 10, MASK.WORLD);
   ok(behind.hit && behind.part === null, 'WORLD mask ignores actor hitboxes');
 
-  // The round penetrates the head and then strikes the torso behind it, so we
-  // only assert on the first damage event.
+  // A round emits at most one damage:dealt per actor, so the first event is the
+  // only one; the latch stays as a guard against a regression re-introducing it.
   let dealt = null;
   const offD = events.on('damage:dealt', (e) => {
     if (!dealt) dealt = { target: e.target, headshot: e.headshot, amount: e.amount };
