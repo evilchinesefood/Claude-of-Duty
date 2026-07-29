@@ -53,8 +53,12 @@ void main() {
     if ( suv.x <= 0.0 || suv.x >= 1.0 || suv.y <= 0.0 || suv.y >= 1.0 ) break;
 
     float sceneDepth = texture2D( tDepth, suv ).r;
-    float cov = texture2D( tNormal, suv ).z;
-    if ( cov < 0.5 ) continue;
+    // Sky test off the depth sample already fetched. gNormal.z (coverage) and
+    // gDepth.r are written together by one prepass fragment and cleared
+    // together, and rasterised depth is >= camera.near, so cov < 0.5 and
+    // sceneDepth <= 0.0 select the identical texels. Saves one fetch per
+    // march step (OW_CS_STEPS = 14).
+    if ( sceneDepth <= 0.0 ) continue;
 
     float diff = -sp.z - sceneDepth;
     float bias = 0.004 + sceneDepth * 0.0025;

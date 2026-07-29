@@ -40,7 +40,6 @@ uniform sampler2D tColor;
 uniform sampler2D tVelocity;
 uniform sampler2D tTile;
 uniform sampler2D tDepth;
-uniform sampler2D tNormal;
 uniform vec2 uTexel;
 uniform vec2 uResolution;
 uniform vec4 uParams;   // x shutter, y maxRadiusPx, z frame, w intensity
@@ -62,9 +61,12 @@ void main() {
   float maxPx = uParams.y;
   if ( pixels > maxPx ) vel *= maxPx / pixels;
 
+  // Sky pushed to the far plane so it cannot drag a weight onto foreground taps.
+  // The old test read gNormal.z (coverage); depth alone answers it, because both
+  // are written by the same prepass fragment and cleared together and rasterised
+  // depth is >= camera.near. That made tNormal dead in this shader.
   float centreDepth = texture2D( tDepth, vUv ).r;
-  float cov = texture2D( tNormal, vUv ).z;
-  if ( cov < 0.5 ) centreDepth = 1e5;
+  if ( centreDepth <= 0.0 ) centreDepth = 1e5;
 
   float jitter = owIGN( gl_FragCoord.xy + uParams.z * 2.717 ) - 0.5;
 
@@ -77,8 +79,7 @@ void main() {
       vec2 uv = vUv + ( s == 0 ? o : -o );
       if ( uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ) continue;
       float d = texture2D( tDepth, uv ).r;
-      float c = texture2D( tNormal, uv ).z;
-      if ( c < 0.5 ) d = 1e5;
+      if ( d <= 0.0 ) d = 1e5;
       // a sample that is much further away than the centre is background
       // leaking in — down-weight it
       float w = 1.0 - smoothstep( 0.0, 1.5, ( d - centreDepth ) / max( 1.0, centreDepth ) );
@@ -104,7 +105,6 @@ export class MotionBlur {
       tVelocity: { value: null },
       tTile: { value: null },
       tDepth: { value: null },
-      tNormal: { value: null },
       uTexel: { value: new THREE.Vector2() },
       uResolution: { value: new THREE.Vector2() },
       uParams: { value: new THREE.Vector4(0.5, 48, 0, 1) },
@@ -134,7 +134,6 @@ export class MotionBlur {
     u.tVelocity.value = gbuffer.velocityTexture;
     u.tTile.value = this.tileRt.texture;
     u.tDepth.value = gbuffer.depthTexture;
-    u.tNormal.value = gbuffer.normalTexture;
     u.uParams.value.x = shutter;
     u.uParams.value.z = frame % 64;
     this.blurPass.render(renderer, this.outRt);

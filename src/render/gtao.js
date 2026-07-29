@@ -99,8 +99,15 @@ void main() {
       vec2 uv1 = vUv + duv;
       if ( uv1.x > 0.0 && uv1.x < 1.0 && uv1.y > 0.0 && uv1.y < 1.0 ) {
         float d1 = texture2D( tDepth, uv1 ).r;
-        float cov1 = texture2D( tNormal, uv1 ).z;
-        if ( cov1 > 0.5 ) {
+        // Coverage test off the depth sample already in hand. gNormal.z and
+        // gDepth.r are written by the same prepass fragment (prepass.js:112,118)
+        // and cleared together, so they are always a matched pair; depth is
+        // vViewDepth >= camera.near = 0.05 for anything rasterised and exactly 0
+        // where the prepass cleared. So cov > 0.5 and d > 0.0 select the
+        // identical texels -- the same trick dof.js already relies on. Dropping
+        // the second fetch halves this loop's bandwidth: 48 sample sites x 2
+        // fetches, ~224M texels/frame at 1080p.
+        if ( d1 > 0.0 ) {
           vec3 ds = owViewPos( uv1, d1, uProjInv ) - P;
           float len2 = dot( ds, ds );
           if ( len2 > 2e-5 ) {
@@ -117,8 +124,7 @@ void main() {
       vec2 uv2 = vUv - duv;
       if ( uv2.x > 0.0 && uv2.x < 1.0 && uv2.y > 0.0 && uv2.y < 1.0 ) {
         float d2 = texture2D( tDepth, uv2 ).r;
-        float cov2 = texture2D( tNormal, uv2 ).z;
-        if ( cov2 > 0.5 ) {
+        if ( d2 > 0.0 ) {
           vec3 ds = owViewPos( uv2, d2, uProjInv ) - P;
           float len2 = dot( ds, ds );
           if ( len2 > 2e-5 ) {

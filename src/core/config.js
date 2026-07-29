@@ -66,7 +66,12 @@ export const QUALITY_PRESETS = {
   },
   ultra: {
     renderScale: 1.0,
-    shadowMapSize: 4096,
+    // 2048, not 4096: `CSM` clamps to 2048 anyway (src/render/csm.js:39 —
+    // "4 x 4096 x R32F is a quarter of a gigabyte for shadows nobody can see"),
+    // so the old 4096 declared a resolution the renderer never honoured and made
+    // this table disagree with the shipped pipeline. Changing it alters nothing
+    // at runtime; it only stops the preset lying about what ultra costs.
+    shadowMapSize: 2048,
     cascades: 4,
     shadowDistance: 200,
     taa: true,
