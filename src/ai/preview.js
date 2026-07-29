@@ -150,8 +150,10 @@ function frame(dt) {
   t = phase + frameIndex * dt;
   for (const a of actors) {
     a.animator.setState({ clip, speed: 1, aimTarget, lookTarget: aimTarget, aimWeight: 1 });
-    a.animator.update(dt, t);
+    // Group first: the animator reads bone matrixWorld directly for its IK and
+    // no longer refreshes ancestors itself (see Animator._wqOf).
     a.group.updateMatrixWorld(true);
+    a.animator.update(dt, t);
   }
 }
 

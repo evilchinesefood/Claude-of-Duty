@@ -228,6 +228,8 @@ export class Agent {
     this.crouch = false;
     this.cover = null;
     this.coverPos = new THREE.Vector3();
+    /** throttles a FAILED cover pick; a successful one is paced by repathTimer */
+    this.coverRetryTimer = 0;
     this.patrolPoints = opts.patrol ?? null;
     this.patrolIndex = 0;
     this.stuckTimer = 0;
@@ -252,6 +254,19 @@ export class Agent {
     this._boneA = new THREE.Vector3();
     this._boneB = new THREE.Vector3();
     this._muzzleDir = new THREE.Vector3();
+    // Reused animator payload — setState copies every field out and never keeps
+    // the object. Deliberately has NO `hurt` key: setState only writes fields
+    // that are not undefined, and the agent has never published `hurt` — adding
+    // it would silently start writing animator state this code does not own.
+    this._animState = {
+      clip: 'idle',
+      speed: 0,
+      crouch: false,
+      aimTarget: null,
+      lookTarget: null,
+      aimWeight: 0,
+      suppress: 0,
+    };
 
     this.clip = 'idle';
   }
@@ -273,6 +288,7 @@ export class Agent {
     this.grenadeCooldown -= dt;
     this.peekTimer -= dt;
     this.repathTimer -= dt;
+    this.coverRetryTimer -= dt;
     this.vaultCooldown -= dt;
     if (this.lastKnownAge < 1e6) this.lastKnownAge += dt;
 
@@ -474,8 +490,12 @@ export class Agent {
       }
     }
 
-    // no cover yet, or the current one no longer protects: find one
-    if (!this.cover || this.repathTimer <= 0) {
+    // No cover yet, or the current one no longer protects: find one. A failed
+    // pick leaves `cover` null, so the "no cover" term alone would re-run the
+    // whole O(cover-points) scan every single frame — which is exactly the state
+    // a squad enters the moment the player opens fire. coverRetryTimer paces the
+    // retries the same way repathTimer paces a successful pick.
+    if ((!this.cover && this.coverRetryTimer <= 0) || this.repathTimer <= 0) {
       const pick = this.ai.cover?.pick(this.position, target, {
         id: this.id,
         squad: sq?.members,
@@ -488,6 +508,8 @@ export class Agent {
         this.cover = pick;
         this.coverPos.set(pick.x, pick.y, pick.z);
         this._goTo(this.coverPos);
+      } else if (!this.cover) {
+        this.coverRetryTimer = this.rng.range(0.4, 0.6);
       }
     }
 
@@ -506,6 +528,11 @@ export class Agent {
       this.cover = null;
       this.ai.cover?.release(this.id);
       this.repathTimer = Math.min(this.repathTimer, 0.6);
+      // `pick()` is deterministic and `release()` just handed the point back, so
+      // without throttling this too it re-picks the same unreachable point and
+      // re-runs the scan plus a failing A* every frame. The repathTimer clamp
+      // above still guarantees a retry inside 0.6 s.
+      this.coverRetryTimer = this.rng.range(0.4, 0.6);
     }
 
     const atCover = this.cover
@@ -951,15 +978,15 @@ export class Agent {
     this.clip = clip;
 
     const an = this.animator;
-    an.setState({
-      clip,
-      speed: this.speed,
-      crouch: this.crouch,
-      aimTarget: this.aimTarget,
-      lookTarget: this.hasTarget || this.lastKnownAge < 4 ? this.lastKnown : this.aimTarget,
-      aimWeight: this.aimWeight,
-      suppress: Math.min(1, this.suppression * 0.8),
-    });
+    const s = this._animState;
+    s.clip = clip;
+    s.speed = this.speed;
+    s.crouch = this.crouch;
+    s.aimTarget = this.aimTarget;
+    s.lookTarget = this.hasTarget || this.lastKnownAge < 4 ? this.lastKnown : this.aimTarget;
+    s.aimWeight = this.aimWeight;
+    s.suppress = Math.min(1, this.suppression * 0.8);
+    an.setState(s);
 
     // ANIMATION RATE LOD. The pose write, the three IK chains and the two foot
     // ground rays are the whole per-actor cost, and for an actor that cannot
@@ -1005,5 +1032,10 @@ export class Agent {
     this.colliders.length = 0;
     if (this.ragdoll) this.phys?.removeRagdoll(this.ragdoll);
     this.group.parent?.remove(this.group);
+    // Every actor owns its own Skeleton, and three lazily allocates a bone
+    // DataTexture per skeleton on first render — the geometry and materials are
+    // shared per variant and are NOT ours to free, but this is.
+    this.skeleton?.dispose?.();
+    this.skeleton = null;
   }
 }
