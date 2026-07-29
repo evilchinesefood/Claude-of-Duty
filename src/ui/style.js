@@ -597,6 +597,79 @@ const CSS = `
   background: linear-gradient(to right, transparent, rgba(255,255,255,.5), transparent);
 }
 
+/* ========================================================== death screen
+   The one overlay that must not read as more of what was already there: at
+   0 HP the low-health vignette is fully applied, so a soft treatment on top of
+   it is invisible as a transition. Hence a hard scrim, display type, and the
+   HUD taken away underneath (see index.js). Nothing here animates on a
+   transition or a keyframe — death.js integrates every value from dt. */
+.ow-death { position:absolute; inset:0; }
+.ow-death-scrim {
+  position:absolute; inset:0;
+  /* Dense enough in the middle to take a blown sky down to something the
+     display type sits on. At .60 the horizon still read as daylight and the
+     screen looked like a tint rather than a hard cut. */
+  background: radial-gradient(ellipse 94% 90% at 50% 46%,
+    rgba(27,5,4,.80) 0%, rgba(12,4,4,.90) 58%, rgba(3,2,3,.96) 100%);
+  will-change: opacity;
+}
+.ow-death-box {
+  position:absolute; left:50%; top:44%;
+  transform: translate(-50%,-50%);
+  width: calc(880px * var(--k));
+  text-align:center;
+}
+.ow-death-t {
+  font-family: var(--fd);
+  font-size: calc(76px * var(--k)); font-weight:700; letter-spacing:.24em;
+  /* cancels the trailing letter-space so the word stays optically centred —
+     at .24em that is ~18px adrift at 1080p */
+  text-indent: .24em;
+  /* Not negotiable: on a machine with none of the condensed families the stack
+     falls back to a much wider face and "YOU DIED" broke over two lines, which
+     also stranded the text-indent on line one. */
+  white-space: nowrap;
+  line-height:.95; color:#f6ece9;
+  text-shadow: var(--o2), 0 0 calc(28px * var(--k)) rgba(125,10,6,.75);
+  will-change: transform, opacity;
+}
+.ow-death-rule {
+  margin: calc(var(--u) * 3) auto 0;
+  width: calc(300px * var(--k)); height: calc(1.5px * var(--k));
+  background: linear-gradient(to right, transparent, var(--blood), var(--red), var(--blood), transparent);
+  transform-origin:50% 50%; transform: scaleX(0);
+  will-change: transform;
+}
+.ow-death-by {
+  margin-top: calc(var(--u) * 4);
+  display:flex; align-items:baseline; justify-content:center;
+  gap: calc(var(--u) * 2.2);
+  font-size: calc(12.5px * var(--k)); letter-spacing:.22em;
+  text-shadow: var(--sh-o1);
+  will-change: opacity;
+}
+.ow-death-by-l { color: var(--ink-3); }
+.ow-death-by-n { color: var(--enemy); font-size: calc(15.5px * var(--k)); letter-spacing:.18em; }
+.ow-death-by-d { color: var(--ink-2); }
+
+.ow-death-foot { margin-top: calc(var(--u) * 7); }
+.ow-death-hold {
+  margin:0 auto; width: calc(150px * var(--k)); height: calc(2px * var(--k));
+  background: rgba(255,255,255,.12);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.5);
+}
+.ow-death-hold > i {
+  display:block; height:100%; width:100%; background: var(--ink-3);
+  transform-origin:left center; transform: scaleX(0);
+  will-change: transform;
+}
+.ow-death-cue {
+  display:flex; align-items:center; justify-content:center;
+  gap: calc(var(--u) * 2.2);
+  will-change: opacity;
+}
+.ow-death-cue > span { font-size: calc(12px * var(--k)); letter-spacing:.28em; text-shadow: var(--sh); }
+
 /* ================================================================== menu */
 .ow-menu {
   position:absolute; inset:0; pointer-events:auto;

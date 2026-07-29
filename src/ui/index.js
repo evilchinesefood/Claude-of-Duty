@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { installStyles, removeStyles } from './style.js';
-import { el, clamp, clamp01, damp, setStyle } from './util.js';
+import { el, clamp, clamp01, damp, pad2, setStyle } from './util.js';
 import { Crosshair } from './crosshair.js';
 import { Hitmarkers } from './hitmarkers.js';
 import { DamageArcs } from './damage.js';
@@ -11,6 +11,7 @@ import { Compass, MatchBar } from './compass.js';
 import { Minimap } from './minimap.js';
 import { WorldMarkers } from './markers.js';
 import { Prompt, Banner } from './prompts.js';
+import { DeathScreen } from './death.js';
 import { PauseMenu } from './menu.js';
 import { CombatDemo } from './demo.js';
 
@@ -51,8 +52,12 @@ const MAX_BLIPS = 48;
  *                              reloadProgress, ads, spread, lethalCount,
  *                              tacticalCount }
  *   player.getHudState()  -> { health, maxHealth, armour, maxArmour, regen,
- *                              move, sprint, crouch, ads, airborne, position }
+ *                              move, sprint, crouch, ads, airborne, position,
+ *                              dead, respawnProgress, respawnReady }
  *                            (or plain `player.health` / `player.position`)
+ *                            `dead` raises the death screen; the two respawn
+ *                            fields draw its hold and its prompt. `player` owns
+ *                            the clock and the respawn itself — see death.js.
  *   ai.getHudActors()     -> [{ position, alive, friendly, heading }]
  *   audio.playUi(id, gain) | audio.play(id) — hit ticks, heartbeat, warnings
  *
@@ -72,11 +77,14 @@ export class UiSystem {
     const host = document.getElementById('ui') ?? document.body;
     this.root = el('div', 'ow-hud', host);
 
-    // Stacking order: hurt overlays sit under the HUD, the menu over everything.
+    // Stacking order: hurt overlays sit under the HUD, the death screen over
+    // the HUD, the menu over everything. DOM order is the whole z-order here,
+    // so the death layer has to exist before the menu is constructed.
     this.hurtLayer = el('div', 'ow-layer', this.root);
     this.worldLayer = el('div', 'ow-layer', this.root);
     this.centreLayer = el('div', 'ow-layer', this.root);
     this.chromeLayer = el('div', 'ow-layer', this.root);
+    this.deathLayer = el('div', 'ow-layer', this.root);
 
     this.health = new HealthFx(this.hurtLayer, this.chromeLayer);
     this.markers = new WorldMarkers(this.worldLayer, this.rng.fork());
@@ -90,6 +98,7 @@ export class UiSystem {
     this.ammo = new AmmoPanel(this.chromeLayer);
     this.prompt = new Prompt(this.chromeLayer);
     this.banner = new Banner(this.chromeLayer);
+    this.death = new DeathScreen(this.deathLayer);
     this.menu = new PauseMenu(this.root, ctx);
 
     this.health.onBeat = (i) => this.sfx('heartbeat', 0.35 + i * 0.5);
@@ -142,6 +151,9 @@ export class UiSystem {
     this._tmp = new THREE.Vector3();
     this._objectives = [];
     this._compassObjs = [];
+    this._wasDead = false;
+    /** Who last hit us, kept as primitives — see _noteAttacker. */
+    this._killer = { variant: '', id: -1, hasPos: false, x: 0, y: 0, z: 0, frame: -1000 };
     this._blips = new Array(MAX_BLIPS);
     for (let i = 0; i < MAX_BLIPS; i++) this._blips[i] = { x: 0, z: 0, kind: 'enemy', heading: 0 };
     this._blipCount = 0;
@@ -179,7 +191,12 @@ export class UiSystem {
       // The payload means "damage dealt TO e.target". `ai` uses it for enemy
       // rounds that connect with the player, which must not draw a hitmarker or
       // a "YOU killed" killfeed row — that arrives as `damage:taken` below.
-      if (this._isPlayerTarget(e.target)) return;
+      // It is, however, the only place the attacker is named, so the death
+      // screen's credit is taken here on the way past.
+      if (this._isPlayerTarget(e.target)) {
+        this._noteAttacker(e, ctx.time.frame);
+        return;
+      }
       // AI shoot each other through the same path, so a round that was not ours
       // must not earn a hitmarker, a damage number or a "YOU killed" row.
       if (!this._isPlayerSource(e.source)) return;
@@ -274,6 +291,60 @@ export class UiSystem {
   _isPlayerSource(s) {
     if (!s) return true;
     return s === 'player' || s === this.ctx.peek('player') || s.isPlayer === true;
+  }
+
+  /**
+   * Remember who last hit us, as primitives rather than as the Agent: the HUD
+   * must not keep a dead attacker alive, and nothing here is read until
+   * `lateUpdate`, by which point every damage handler for the frame has run —
+   * so subscriber order between `player` and `ui` cannot decide the credit.
+   */
+  _noteAttacker(e, frame) {
+    const k = this._killer;
+    const src = typeof e.source === 'object' ? e.source : null;
+    k.variant = src?.variantName ?? '';
+    k.id = typeof src?.id === 'number' ? src.id : -1;
+    // `from` is the muzzle; `point` is where the round landed, which is us.
+    // Copy the components: `ai` emits a shared reusable vector, so holding the
+    // object would alias to wherever the next AI round is fired from.
+    const p = e.from ?? src?.position ?? null;
+    k.hasPos = !!p;
+    if (p) {
+      k.x = p.x;
+      k.y = p.y;
+      k.z = p.z;
+    }
+    k.frame = frame;
+  }
+
+  /**
+   * Latch the killer at the moment of death: the respawn moves us, so the
+   * bearing has to be taken from where we fell.
+   */
+  _onPlayerDeath(pos) {
+    const k = this._killer;
+    // A blast or a fall arrives as `damage:taken` with no `damage:dealt` behind
+    // it, so a stale attacker must not be credited for it. Gated on the frame
+    // counter rather than on elapsed seconds: the attributing `damage:dealt`,
+    // the `player:death` it causes and this lateUpdate are all the same frame,
+    // and a seconds window wide enough to be safe was also wide enough to blame
+    // the rifleman who shot you 0.3 s before the grenade actually killed you.
+    const fresh = this.ctx.time.frame - k.frame <= 1;
+    let name = '';
+    if (fresh) {
+      name = k.variant ? k.variant.toUpperCase() : 'ENEMY';
+      if (k.variant && k.id >= 0) name += '-' + pad2(k.id);
+    }
+    let dist = -1;
+    let bearing = 0;
+    if (fresh && k.hasPos) {
+      const dx = k.x - pos.x;
+      const dz = k.z - pos.z;
+      dist = Math.hypot(dx, dz);
+      bearing = (Math.atan2(dx, -dz) * 180) / Math.PI;
+    }
+    this.death.show(name, dist, bearing);
+    this.sfx('low_health', 0.9);
   }
 
   _playerState() {
@@ -480,6 +551,19 @@ export class UiSystem {
     }
     this._prevPos.copy(pos);
 
+    // ---- death screen ----------------------------------------------------
+    // Polled rather than driven off `player:death`, so it runs after every
+    // damage handler for the frame and after the camera has stopped moving.
+    // `dt` is game time: the screen freezes with the rest of the HUD when the
+    // pause menu opens over it, which is the same clock the hold runs on.
+    const dead = !!ps?.dead;
+    if (dead !== this._wasDead) {
+      this._wasDead = dead;
+      if (dead) this._onPlayerDeath(pos);
+      else this.death.hide();
+    }
+    this.death.update(dt, ps?.respawnProgress ?? 0, !!ps?.respawnReady);
+
     // ---- health regeneration when nobody else owns health ----------------
     if (!ps && !s.simulate && s.health < s.maxHealth) {
       this._regenTimer += dt;
@@ -514,7 +598,9 @@ export class UiSystem {
     const heading = (Math.atan2(fx, -fz) * 180) / Math.PI;
 
     // ---- widgets ---------------------------------------------------------
-    const hudGoal = this.hudTarget * (this.menu.open ? 0.15 : 1);
+    // Taking the HUD away is half of what makes death read as a state change
+    // rather than as a continuation of the low-health treatment.
+    const hudGoal = this.hudTarget * (this.menu.open ? 0.15 : 1) * (1 - this.death.shown);
     this.hudVisible = damp(this.hudVisible, hudGoal, 10, rawDt);
     setStyle(this.chromeLayer, 'opacity', this.hudVisible.toFixed(3));
     setStyle(this.worldLayer, 'opacity', this.hudVisible.toFixed(3));
@@ -623,6 +709,7 @@ export class UiSystem {
     this.markers.dispose();
     this.prompt.dispose();
     this.banner.dispose();
+    this.death.dispose();
     this.menu.dispose();
     this.root.remove();
     removeStyles();

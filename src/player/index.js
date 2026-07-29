@@ -57,7 +57,9 @@
  *   p.applyDamage(amount, fromVector3, opts)   p.heal(a)   p.addSuppression(a)
  *
  * CONTROL
- *   p.setControlEnabled(bool)     shot harness / cutscenes
+ *   p.setControlEnabled(bool, claim=true)   shot harness / cutscenes. Pass
+ *                                 claim=false only if you save and restore what
+ *                                 you found (the pause menu) — see DEATH below
  *   p.teleport(eyePosition, rotationEulerOrYaw)
  *   p.respawn(index)
  *   p.debugState(name)            'sprint'|'slide'|'crouch'|'hurt'|'critical'|
@@ -79,10 +81,13 @@
  *
  * DEATH
  *   `health` emits `player:death`; this system consumes it and owns the whole
- *   cycle, because nothing else does. Control freezes, `player:state` goes out
- *   with `dead: true` (and `getHudState().dead` follows) so `ui` can put up a
- *   death screen, and after RESPAWN_DELAY seconds of *game* time the player is
- *   put back on a spawn point with health, vignette and heartbeat cleared.
+ *   cycle, because nothing else does. Control freezes and `player:state` goes
+ *   out with `dead: true` (and `getHudState().dead` follows) so `ui` can put up
+ *   a death screen. RESPAWN_DELAY seconds of *game* time later the respawn is
+ *   armed — `getHudState().respawnReady` — and from then on it waits for the
+ *   player to press jump or use. Nobody is respawned without asking. Once
+ *   asked, the player is put back on a spawn point with health, vignette and
+ *   heartbeat cleared.
  */
 
 import * as THREE from 'three';
@@ -93,7 +98,11 @@ import { LowHealthPass } from './lowhealth.js';
 import { STANCE, MOVE, CAMERA, HEALTH, FOOTSTEP, JUMP_SPEED } from './tuning.js';
 import { clamp, clamp01, lerp, approach, DEG } from './springs.js';
 
-/** Seconds of game time the death screen holds before the respawn. */
+/**
+ * Seconds of game time the death screen holds before the respawn is armed.
+ * The hold is mandatory so death registers and cannot be spammed through; after
+ * it the player is asked rather than moved.
+ */
 const RESPAWN_DELAY = 2.6;
 
 export class PlayerSystem {
@@ -121,8 +130,14 @@ export class PlayerSystem {
     // ---- death → respawn -------------------------------------------------
     this._deathTimer = 0;
     this._controlBeforeDeath = true;
-    /** Bumped by every setControlEnabled call, so the respawn can tell whether
-     *  anyone else (pause menu, shot harness) took control while we were dead. */
+    /** The last value an *owning* caller asked for. What a respawn restores —
+     *  reading `controlEnabled` instead would latch a transparent freeze (the
+     *  pause menu's) and hand `false` back to a player who is alive again. */
+    this._claimedControl = true;
+    /** Bumped by every setControlEnabled call that claims ownership, so the
+     *  respawn can tell whether anyone else (shot harness, cutscene) took
+     *  control while we were dead. Transparent save/restore callers opt out —
+     *  see setControlEnabled. */
     this._controlEpoch = 0;
     this._deathEpoch = -1;
 
@@ -144,7 +159,7 @@ export class PlayerSystem {
     this._hudState = {
       health: HEALTH.max, maxHealth: HEALTH.max, regen: false, dead: false,
       move: 0, sprint: false, crouch: false, ads: false, airborne: false,
-      suppression: 0, position: null,
+      suppression: 0, position: null, respawnProgress: 0, respawnReady: false,
     };
 
     this._tmp = new THREE.Vector3();
@@ -483,28 +498,57 @@ export class PlayerSystem {
   /* ==================================================================== */
 
   /**
-   * `health` has hit zero. Freeze control and start the respawn clock. The
-   * frozen frame keeps the low-health treatment fully applied, which is the
-   * death screen: the vignette is already saturated at 0 HP.
+   * `health` has hit zero. Freeze control and start the hold. The frozen frame
+   * still carries the saturated low-health vignette, but that is no longer the
+   * whole of it: `ui` reads `dead` off getHudState() and puts up a real death
+   * screen over the top, which is what makes dying read as a state change
+   * rather than as the treatment you were already looking at.
    */
   _onDeath() {
-    if (this._deathTimer > 0) return;
+    // `_deathEpoch`, not `_deathTimer`: the timer reaches 0 while we are still
+    // dead and waiting to be asked, and that is not an invitation to re-enter.
+    if (this._deathEpoch >= 0) return;
     this._deathTimer = RESPAWN_DELAY;
-    this._controlBeforeDeath = this.controlEnabled;
+    // The last *claimed* value, not the live one: dying while the pause menu
+    // holds its transparent freeze would otherwise latch `false` here and
+    // restore it to a player who is alive again on the other side.
+    this._controlBeforeDeath = this._claimedControl;
     this.setControlEnabled(false);
     this._deathEpoch = this._controlEpoch;
     this._publishState();
   }
 
   /**
-   * Runs the respawn clock. `dt` is `ctx.time.dt`, so the delay follows the
-   * engine clock, pauses and time scale — never wall time.
+   * Runs the mandatory hold, then waits to be asked. `dt` is `ctx.time.dt`, so
+   * both the hold and the input read follow the engine clock, pauses and time
+   * scale — never wall time. A paused game has `dt === 0`, which is what keeps
+   * a keypress aimed at the pause menu from respawning you behind it.
    */
   _updateDeath(dt) {
-    if (this._deathTimer <= 0) return;
-    this._deathTimer -= dt;
-    if (this._deathTimer > 0) return;
-    this.respawn(0); // performs the teardown, including the control hand-back
+    if (this._deathEpoch < 0 || dt <= 0) return;
+    if (this._deathTimer > 0) {
+      this._deathTimer = Math.max(0, this._deathTimer - dt);
+      return;
+    }
+    // This is the one input read in the codebase that runs while
+    // `controlEnabled` is false, so it inherits none of the suppression the
+    // rest of the system leans on and has to gate itself — same pair as
+    // `weapons` (src/weapons/index.js). Capture sets `frozen` but leaves
+    // `enabled` true (src/dev/shots.js), so a real keypress in the capture
+    // browser would otherwise teleport the player mid-shot.
+    const input = this.ctx.input;
+    if (input.frozen || input.enabled === false) return;
+    // Read from update(), which is inside the input.beginFrame()/endFrame()
+    // window where this frame's press edges are live. Reading it from
+    // fixedUpdate would see the edge zero or many times depending on the
+    // substep count.
+    //
+    // A press EDGE, deliberately: a key already held when you died is not you
+    // asking to go back in, and dying mid-bunny-hop should not respawn you the
+    // instant the hold expires. Release and press.
+    if (input.actionPressed('jump') || input.actionPressed('use')) {
+      this.respawn(0); // performs the teardown, including the control hand-back
+    }
   }
 
   /**
@@ -540,6 +584,10 @@ export class PlayerSystem {
     h.maxHealth = hp.max;
     h.regen = hp.regenerating;
     h.dead = hp.dead;
+    // The death screen runs no clock of its own: it draws the hold from here
+    // and puts up the respawn prompt when `ui` sees the respawn armed.
+    h.respawnProgress = this._deathEpoch < 0 ? 0 : clamp01(1 - this._deathTimer / RESPAWN_DELAY);
+    h.respawnReady = this._deathEpoch >= 0 && this._deathTimer <= 0;
     h.suppression = hp.suppression;
     // 0..1 against tactical sprint, which is the fastest the player can move —
     // `ui` uses this directly as the reticle-bloom weight.
@@ -684,9 +732,22 @@ export class PlayerSystem {
     this.health.addSuppression(a);
   }
 
-  setControlEnabled(on) {
-    this._controlEpoch++;
-    this.controlEnabled = !!on;
+  /**
+   * @param {boolean} on
+   * @param {boolean} [claim=true] whether this counts as taking ownership of
+   *   control. Callers that save and restore what they found — the pause menu —
+   *   pass false, because they are transparent: bumping the epoch for them made
+   *   `_endDeath` refuse to hand control back after a pause opened and closed
+   *   over the death screen. Anything that seizes control for itself (the shot
+   *   harness, a cutscene) must leave this true so the death cycle can see it.
+   */
+  setControlEnabled(on, claim = true) {
+    on = !!on;
+    if (claim) {
+      this._controlEpoch++;
+      this._claimedControl = on;
+    }
+    this.controlEnabled = on;
     this.movement.controlEnabled = this.controlEnabled;
     if (!on) {
       this.movement.latchInput(-2); // flush held keys

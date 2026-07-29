@@ -166,7 +166,10 @@ export class PauseMenu {
       this._prevScale = t.scale;
       t.scale = 0;
     }
-    this.ctx.peek('player')?.setControlEnabled?.(false);
+    // `claim: false` — the menu is transparent about control, it does not own
+    // it. Claiming would move `player`'s control epoch and leave the death
+    // cycle unable to hand control back after a pause over the death screen.
+    this.ctx.peek('player')?.setControlEnabled?.(false, false);
     this.ctx.events.emit('ui:pause', { paused: true });
   }
 
@@ -175,7 +178,11 @@ export class PauseMenu {
     this.open = false;
     const t = this.ctx.time;
     if (t) t.scale = this._prevScale ?? 1;
-    this.ctx.peek('player')?.setControlEnabled?.(true);
+    // Re-derived, not a snapshot taken at show(): a corpse must stay frozen so
+    // it cannot walk and so its respawn is not stranded, but a player who came
+    // back to life while the menu was open must not be left with no control.
+    const player = this.ctx.peek('player');
+    player?.setControlEnabled?.(player?.dead !== true, false);
     this.ctx.input?.requestPointerLock?.();
     this.ctx.events.emit('ui:pause', { paused: false });
   }
