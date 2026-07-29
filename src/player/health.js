@@ -16,6 +16,16 @@ import * as THREE from 'three';
 import { HEALTH } from './tuning.js';
 import { clamp01, approach, lerp, DEG } from './springs.js';
 
+/**
+ * One gaussian thump of the heartbeat envelope. Module scope on purpose: as a
+ * local arrow closing over `t` this allocated a closure every frame the
+ * low-health treatment was live (R5).
+ */
+function thump(t, c, w, g) {
+  const d = t - c;
+  return g * Math.exp(-(d * d) / (2 * w * w));
+}
+
 export class Health {
   constructor(ctx, rig) {
     this.ctx = ctx;
@@ -47,6 +57,8 @@ export class Health {
     this._emitTimer = 0;
     this._lastEmitHealth = HEALTH.max;
     this._beat = { strength: 0, fraction: 1 };
+    // Death is no longer a one-shot: `player` respawns and you can die again.
+    this._deathPayload = { position: new THREE.Vector3() };
   }
 
   get fraction() {
@@ -68,6 +80,15 @@ export class Health {
     this.hitFlash = 0;
     this.lastDamageTime = -100;
     for (let k = 0; k < this.indicators.length; k++) this.indicators[k].active = false;
+    if (full) {
+      // A full reset is a respawn. `effect` is normally damped towards its
+      // target, so without snapping it the vignette and the heartbeat would
+      // bleed a second into the new life.
+      this.regenerating = false;
+      this.effect = 0;
+      this.pulse = 0;
+      this.beatPhase = 0;
+    }
   }
 
   /* ==================================================================== */
@@ -125,8 +146,8 @@ export class Health {
 
     if (this.value <= 0) {
       this.dead = true;
-      this.ctx.events.emit('player:death', { position: this.ctx.camera.position });
-      // (one allocation on death is fine — it happens once)
+      this._deathPayload.position.copy(this.ctx.camera.position);
+      this.ctx.events.emit('player:death', this._deathPayload);
     }
     this._emitState(true);
     return dealt;
@@ -202,8 +223,7 @@ export class Health {
       }
       // lub-dub: two gaussian thumps 0.16 of a cycle apart
       const t = this.beatPhase;
-      const thump = (c, w, g) => g * Math.exp(-((t - c) * (t - c)) / (2 * w * w));
-      this.pulse = (thump(0.06, 0.035, 1) + thump(0.22, 0.045, 0.62)) * this.effect;
+      this.pulse = (thump(t, 0.06, 0.035, 1) + thump(t, 0.22, 0.045, 0.62)) * this.effect;
     } else {
       this.beatPhase = 0;
       this.pulse = 0;

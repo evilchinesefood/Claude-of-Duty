@@ -71,6 +71,8 @@ export class Movement {
     // ---- timers --------------------------------------------------------
     this._coyote = 0;
     this._jumpBuffer = 0;
+    this._crouchBuffer = 0;
+    this._proneBuffer = 0;
     this._jumpCooldown = 0;
     this._sprintHoldTime = 0;
     this._lastSprintPress = -10;
@@ -193,7 +195,16 @@ export class Movement {
       cmd.sprintHeld = false; cmd.sprintPressed = false;
       cmd.leanL = false; cmd.leanR = false;
       cmd.ads = false;
+      // Deliberate: clearing `prev` makes a key held across the pause re-fire its
+      // edge on resume. Drop any buffered stance edge with it, so a toggle
+      // latched just before the pause cannot fire minutes later.
       prev.jump = prev.crouch = prev.prone = prev.sprint = false;
+      // All three, not just the stance pair: `_tickTimers` only runs inside
+      // step(), which never runs while control is off, so a jump latched just
+      // before the pause would not decay and would fire the instant it resumes.
+      this._jumpBuffer = 0;
+      this._crouchBuffer = 0;
+      this._proneBuffer = 0;
       return;
     }
 
@@ -206,12 +217,17 @@ export class Movement {
     const prone = input.action('prone');
     const sprint = input.action('sprint') || Math.abs(this.ctx.input.stick.moveY) > 0.92;
 
-    cmd.jump = jump && !prev.jump;
+    // Edges come from Input's press set, which is the only thing that sees a tap
+    // whose keydown and keyup both land inside one frame gap. The `held && !prev`
+    // term stays for the two cases the press set cannot cover: the gamepad sprint
+    // stick, and a key still held across a control pause — the block above clears
+    // `prev`, so the edge deliberately re-fires on resume.
+    cmd.jump = input.actionPressed('jump') || (jump && !prev.jump);
     cmd.jumpHeld = jump;
-    cmd.crouchPressed = crouch && !prev.crouch;
-    cmd.pronePressed = prone && !prev.prone;
+    cmd.crouchPressed = input.actionPressed('crouch') || (crouch && !prev.crouch);
+    cmd.pronePressed = input.actionPressed('prone') || (prone && !prev.prone);
     cmd.sprintHeld = sprint;
-    cmd.sprintPressed = sprint && !prev.sprint;
+    cmd.sprintPressed = input.actionPressed('sprint') || (sprint && !prev.sprint);
     cmd.leanL = input.action('leanLeft');
     cmd.leanR = input.action('leanRight');
     cmd.ads = input.ads;
@@ -221,7 +237,13 @@ export class Movement {
     prev.prone = prone;
     prev.sprint = sprint;
 
+    // Buffer the discrete edges. latchInput runs once per rendered frame but
+    // step() only runs on frames that carry a fixed step, so an edge latched on a
+    // zero-substep frame (dt < 1/120) would be recomputed away by the next frame's
+    // latch before any step observed it. Jump already had this; stance needs it.
     if (cmd.jump) this._jumpBuffer = MOVE.jumpBuffer;
+    if (cmd.crouchPressed) this._crouchBuffer = MOVE.jumpBuffer;
+    if (cmd.pronePressed) this._proneBuffer = MOVE.jumpBuffer;
     if (cmd.sprintPressed) {
       const now = this.ctx.time.elapsed;
       if (now - this._lastSprintPress < MOVE.tacSprintTapWindow && this._tacSprintLock <= 0) {
@@ -265,9 +287,26 @@ export class Movement {
     this._right.set(cy, 0, -sy);
 
     if (this.mantleMotion.active) {
+      // Discard stance edges taken mid-mantle. Without this the buffer survives
+      // the mantle (it only decays at 1/120 s a substep) and toggles stance the
+      // instant the mantle ends, which is not what the tap asked for.
+      this._crouchBuffer = 0;
+      this._proneBuffer = 0;
       this._stepMantle(h);
       this._publish();
       return;
+    }
+
+    // Re-arm the stance edges from their buffers. Placed after the edge-frame
+    // gate above so a buffer set on a zero-substep frame still fires exactly
+    // once, on the first substep that actually runs.
+    if (this._crouchBuffer > 0) {
+      cmd.crouchPressed = true;
+      this._crouchBuffer = 0;
+    }
+    if (this._proneBuffer > 0) {
+      cmd.pronePressed = true;
+      this._proneBuffer = 0;
     }
 
     // ---- wish direction, with directional speed weighting ---------------
@@ -341,6 +380,8 @@ export class Movement {
 
   _tickTimers(h) {
     this._jumpBuffer = Math.max(0, this._jumpBuffer - h);
+    this._crouchBuffer = Math.max(0, this._crouchBuffer - h);
+    this._proneBuffer = Math.max(0, this._proneBuffer - h);
     this._jumpCooldown = Math.max(0, this._jumpCooldown - h);
     this._slideCooldown = Math.max(0, this._slideCooldown - h);
     this._mantleCooldown = Math.max(0, this._mantleCooldown - h);
@@ -750,6 +791,8 @@ export class Movement {
     this.velocity.set(0, 0, 0);
     c.velocity.x = c.velocity.y = c.velocity.z = 0;
     this._jumpBuffer = 0;
+    this._crouchBuffer = 0;
+    this._proneBuffer = 0;
     this.sprinting = false;
     this.tacticalSprint = false;
     this.mantleEvent.pending = true;
@@ -979,6 +1022,8 @@ export class Movement {
     this._bobPhase = 0;
     this._footHold = 0;
     this._jumpBuffer = 0;
+    this._crouchBuffer = 0;
+    this._proneBuffer = 0;
     this.landEvent.pending = false;
     this.stepEvent.pending = false;
     this._setState('stand');

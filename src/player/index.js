@@ -76,6 +76,13 @@
  *   (*) not in the canonical table in ARCHITECTURE.md — additive, optional, and
  *   safe to ignore. The canonical `player:state` payload carries `health` too so
  *   a listener that only knows the documented four fields still gets everything.
+ *
+ * DEATH
+ *   `health` emits `player:death`; this system consumes it and owns the whole
+ *   cycle, because nothing else does. Control freezes, `player:state` goes out
+ *   with `dead: true` (and `getHudState().dead` follows) so `ui` can put up a
+ *   death screen, and after RESPAWN_DELAY seconds of *game* time the player is
+ *   put back on a spawn point with health, vignette and heartbeat cleared.
  */
 
 import * as THREE from 'three';
@@ -85,6 +92,9 @@ import { Health } from './health.js';
 import { LowHealthPass } from './lowhealth.js';
 import { STANCE, MOVE, CAMERA, HEALTH, FOOTSTEP, JUMP_SPEED } from './tuning.js';
 import { clamp, clamp01, lerp, approach, DEG } from './springs.js';
+
+/** Seconds of game time the death screen holds before the respawn. */
+const RESPAWN_DELAY = 2.6;
 
 export class PlayerSystem {
   static id = 'player';
@@ -108,11 +118,20 @@ export class PlayerSystem {
     this._lookFrame = -1;
     this._prevYaw = 0;
 
+    // ---- death → respawn -------------------------------------------------
+    this._deathTimer = 0;
+    this._controlBeforeDeath = true;
+    /** Bumped by every setControlEnabled call, so the respawn can tell whether
+     *  anyone else (pause menu, shot harness) took control while we were dead. */
+    this._controlEpoch = 0;
+    this._deathEpoch = -1;
+
     // preallocated event payloads
     this._statePayload = {
       stance: 'stand', sprinting: false, sliding: false, ads: false,
       state: 'stand', grounded: true, airborne: false, mantling: false,
       lean: 0, speed: 0, health: HEALTH.max, healthFraction: 1, crouched: false,
+      dead: false,
     };
     this._landPayload = { velocity: 0, surface: 'concrete', position: new THREE.Vector3() };
     this._stepPayload = {
@@ -132,7 +151,7 @@ export class PlayerSystem {
     /** Last emitted discrete state, compared field-wise so no string is built. */
     this._prev = {
       state: '', stance: '', sprinting: false, tacticalSprint: false,
-      sliding: false, grounded: true, ads: false, mantling: false,
+      sliding: false, grounded: true, ads: false, mantling: false, dead: false,
     };
     this._offEvents = [];
   }
@@ -188,6 +207,7 @@ export class PlayerSystem {
     on('damage:dealt', (e) => this._onDamageDealt(e));
     on('explosion', (e) => this._onExplosion(e));
     on('bullet:impact', (e) => this._onBulletImpact(e));
+    on('player:death', () => this._onDeath());
 
     console.info(
       `[player] spawn ${spawn.feet.x.toFixed(1)}, ${spawn.feet.y.toFixed(2)}, ` +
@@ -279,6 +299,7 @@ export class PlayerSystem {
 
     this._updateAds(dt);
     this._drainMovementEvents();
+    this._updateDeath(dt);
     this.health.update(dt);
 
     this.rig.update(dt, this.movement, this.health);
@@ -393,17 +414,20 @@ export class PlayerSystem {
     s.speed = m.horizontalSpeed;
     s.health = this.health.value;
     s.healthFraction = this.health.fraction;
+    s.dead = this.health.dead;
     // Emit only when something discrete actually changed. Field-wise compare,
     // because building a key string every frame would be a per-frame allocation.
     const q = this._prev;
     if (
       q.state !== s.state || q.stance !== s.stance || q.sprinting !== s.sprinting ||
       q.tacticalSprint !== s.tacticalSprint || q.sliding !== s.sliding ||
-      q.grounded !== s.grounded || q.ads !== s.ads || q.mantling !== s.mantling
+      q.grounded !== s.grounded || q.ads !== s.ads || q.mantling !== s.mantling ||
+      q.dead !== s.dead
     ) {
       q.state = s.state; q.stance = s.stance; q.sprinting = s.sprinting;
       q.tacticalSprint = s.tacticalSprint; q.sliding = s.sliding;
       q.grounded = s.grounded; q.ads = s.ads; q.mantling = s.mantling;
+      q.dead = s.dead;
       this.ctx.events.emit('player:state', s);
     }
   }
@@ -452,6 +476,52 @@ export class PlayerSystem {
     const f = this.rig.forward;
     if ((dx * f.x + dy * f.y + dz * f.z) / d > 0.55) return;
     this.health.addSuppression(HEALTH.suppression.perNearMiss * (1 - d / R));
+  }
+
+  /* ==================================================================== */
+  /* death → respawn                                                      */
+  /* ==================================================================== */
+
+  /**
+   * `health` has hit zero. Freeze control and start the respawn clock. The
+   * frozen frame keeps the low-health treatment fully applied, which is the
+   * death screen: the vignette is already saturated at 0 HP.
+   */
+  _onDeath() {
+    if (this._deathTimer > 0) return;
+    this._deathTimer = RESPAWN_DELAY;
+    this._controlBeforeDeath = this.controlEnabled;
+    this.setControlEnabled(false);
+    this._deathEpoch = this._controlEpoch;
+    this._publishState();
+  }
+
+  /**
+   * Runs the respawn clock. `dt` is `ctx.time.dt`, so the delay follows the
+   * engine clock, pauses and time scale — never wall time.
+   */
+  _updateDeath(dt) {
+    if (this._deathTimer <= 0) return;
+    this._deathTimer -= dt;
+    if (this._deathTimer > 0) return;
+    this.respawn(0); // performs the teardown, including the control hand-back
+  }
+
+  /**
+   * Single exit from the death cycle. Every path that ends it goes through here
+   * — the respawn clock, an external `respawn()`, `debugState('reset')` — so a
+   * respawn during the freeze can never leave control disabled for ever.
+   * `_deathEpoch` must be cleared before `setControlEnabled`, which bumps
+   * `_controlEpoch`.
+   */
+  _endDeath() {
+    if (this._deathTimer <= 0 && this._deathEpoch < 0) return;
+    this._deathTimer = 0;
+    // Only hand control back if nothing else claimed it while we were dead
+    // (a pause menu opened over the death screen, say).
+    const restore = this._deathEpoch >= 0 && this._controlEpoch === this._deathEpoch;
+    this._deathEpoch = -1;
+    if (restore) this.setControlEnabled(this._controlBeforeDeath);
   }
 
   /* ==================================================================== */
@@ -615,6 +685,7 @@ export class PlayerSystem {
   }
 
   setControlEnabled(on) {
+    this._controlEpoch++;
     this.controlEnabled = !!on;
     this.movement.controlEnabled = this.controlEnabled;
     if (!on) {
@@ -658,6 +729,7 @@ export class PlayerSystem {
     const world = this.ctx.peek('world');
     const sp = world?.spawn?.(index);
     this.health.reset(true);
+    this._endDeath();
     if (!sp?.position) return;
     const gy = this.physics.groundHeight(sp.position.x, sp.position.z, sp.position.y + 6);
     const feetY = Number.isFinite(gy) ? gy + 0.03 : sp.position.y;
@@ -710,7 +782,7 @@ export class PlayerSystem {
         break;
       case 'reset':
         this.health.reset(true);
-        this.health.effect = 0;
+        this._endDeath();
         break;
       default:
         break;
