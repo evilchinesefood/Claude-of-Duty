@@ -81,8 +81,9 @@ Emit and listen via `ctx.events`. Payloads are plain objects. The canonical set:
 | `weapon:shell` | `{ position, velocity }` | weapons |
 | `bullet:impact` | `{ point, normal, surface, incident, damage }` | physics |
 | `bullet:tracer` | `{ from, to, speed }` | weapons |
-| `damage:dealt` | `{ target, amount, headshot, killed, point }` | ai / physics |
+| `damage:dealt` | `{ target, amount, headshot, killed, point, source }` | ai / physics |
 | ↳ | means *damage dealt **to** `target`*. `target` is the local player when an enemy round connects (`'player'`, the player system, or anything with `isPlayer === true`) — filter it out before drawing a hitmarker. Damage is applied by the target's own listener, never by the emitter as well. | |
+| ↳ | `source` is who fired, in the same vocabulary as `target` (the player system / `'player'`, or the shooting `Agent`). AI shoot each other through the same path, so kill credit, hitmarkers and range falloff must key off `source`, not off the player. Absent `source` means the local player. One round emits at most one event per `target`. | |
 | `damage:taken` | `{ amount, from: Vector3, health }` | player |
 | `actor:death` | `{ actor, point, impulse }` | ai |
 | `player:land` | `{ velocity, surface }` | player |

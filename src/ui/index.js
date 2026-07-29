@@ -180,6 +180,9 @@ export class UiSystem {
       // rounds that connect with the player, which must not draw a hitmarker or
       // a "YOU killed" killfeed row — that arrives as `damage:taken` below.
       if (this._isPlayerTarget(e.target)) return;
+      // AI shoot each other through the same path, so a round that was not ours
+      // must not earn a hitmarker, a damage number or a "YOU killed" row.
+      if (!this._isPlayerSource(e.source)) return;
       const kind = e.killed ? 'kill' : e.headshot ? 'head' : e.armour ? 'armour' : 'hit';
       this.hitmarker(kind);
       if (e.point) {
@@ -218,9 +221,13 @@ export class UiSystem {
 
     on('actor:death', (e) => {
       if (ctx.time.elapsed - this._lastKillAt < 0.3) return; // already credited
+      // Only the player is 'OPERATOR'. `actor:death` carries no attacker and an
+      // Agent has no `name` (it names its group), so defaulting the victim to
+      // the player made every uncredited AI death read as "you died".
+      const a = e?.actor;
       this.killfeed.push({
         attacker: e?.by?.name ?? 'ENEMY',
-        victim: e?.actor?.name ?? 'OPERATOR',
+        victim: this._isPlayerTarget(a) ? 'OPERATOR' : a?.name ?? a?.group?.name ?? 'ENEMY',
         attackerFriendly: false,
       });
     });
@@ -257,6 +264,16 @@ export class UiSystem {
   _isPlayerTarget(t) {
     if (!t) return false;
     return t === 'player' || t === this.ctx.peek('player') || t.isPlayer === true;
+  }
+
+  /**
+   * True when a `damage:dealt` payload came from the local player. An absent
+   * `source` counts as ours: it is the pre-attribution shape of the event and
+   * only ever reached here from the player's own weapon.
+   */
+  _isPlayerSource(s) {
+    if (!s) return true;
+    return s === 'player' || s === this.ctx.peek('player') || s.isPlayer === true;
   }
 
   _playerState() {
@@ -548,7 +565,7 @@ export class UiSystem {
   _collectBlips() {
     if (this.demo?.active) return; // demo drives its own contacts
     const ai = this.ctx.peek('ai');
-    const list = typeof ai?.getHudActors === 'function' ? ai.getHudActors() : ai?.actors ?? null;
+    const list = typeof ai?.getHudActors === 'function' ? ai.getHudActors() : null;
     if (!Array.isArray(list)) return;
     let n = 0;
     for (let i = 0; i < list.length && n < MAX_BLIPS; i++) {

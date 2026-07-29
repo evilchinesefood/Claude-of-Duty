@@ -30,6 +30,7 @@ class Projectile {
     this.dropoff = 0.5;
     this.weapon = null;
     this.mask = undefined;
+    this.source = null;
   }
 }
 
@@ -53,8 +54,19 @@ export class ProjectileSim {
   }
 
   /**
+   * Attribution for rounds spawned without an explicit `source`: this sim only
+   * ever carries the local player's shots (the ai fires hitscan straight at
+   * `physics.fireBullet`), and `damage:dealt` needs a shooter so the HUD does
+   * not credit the player for someone else's kill.
+   */
+  get playerSource() {
+    if (!this._playerSource) this._playerSource = this.ctx.peek('player') ?? 'player';
+    return this._playerSource;
+  }
+
+  /**
    * @param {object} o origin, dir (unit), speed, damage, penetration, dragK,
-   *                   maxRange, dropoff, weapon, tracer
+   *                   maxRange, dropoff, weapon, tracer, source
    */
   spawn(o) {
     let p = null;
@@ -65,8 +77,11 @@ export class ProjectileSim {
       }
     }
     if (!p) {
-      // Oldest round yields its slot rather than dropping the shot.
-      p = this.live[0];
+      // Oldest round yields its slot rather than dropping the shot. It has to
+      // leave `live` as well — `_retire` only clears the flag, so pushing it
+      // back below would list the same projectile twice and integrate (and
+      // impact) it twice per step.
+      p = this.live.shift();
       if (!p) return null;
       this._retire(p);
     }
@@ -84,6 +99,7 @@ export class ProjectileSim {
     p.age = 0;
     p.weapon = o.weapon ?? null;
     p.mask = o.mask;
+    p.source = o.source ?? null;
     this.live.push(p);
     this.stats.fired++;
 
@@ -138,6 +154,7 @@ export class ProjectileSim {
             penetration: p.penetration,
             dropoff: 1,
             mask: p.mask,
+            source: p.source ?? this.playerSource,
           });
           this.stats.impacts++;
           this._retire(p);

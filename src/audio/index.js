@@ -701,9 +701,15 @@ export class AudioSystem {
     // damage is handled by _onDamageTaken.
     const t = p.target;
     if (t === 'player' || t?.isPlayer === true || t === this.ctx.peek('player')) return;
-    this.ui(p.headshot ? 'headshot' : 'hitmarker', 1);
-    if (p.killed) this.ui('kill', 1);
-    else if (p.point && p.target && this.rng.float() < 0.3) {
+    // AI shoot each other through this same event. Only our own rounds earn the
+    // UI ticks; an absent `source` is the pre-attribution shape and is ours.
+    // The pain bark is world audio, so it plays whoever pulled the trigger.
+    const s = p.source;
+    const mine = !s || s === 'player' || s.isPlayer === true || s === this.ctx.peek('player');
+    if (mine) this.ui(p.headshot ? 'headshot' : 'hitmarker', 1);
+    if (p.killed) {
+      if (mine) this.ui('kill', 1);
+    } else if (p.point && p.target && this.rng.float() < 0.3) {
       this.bark('hurt', p.point, { level: 0.85 });
     }
   }

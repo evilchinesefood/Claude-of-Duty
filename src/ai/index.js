@@ -19,6 +19,8 @@
  * PUBLIC API — `const ai = ctx.get('ai')`
  *   ai.spawn(variant, position, yaw, opts) -> Agent
  *   ai.agents                              live Agent list
+ *   ai.getHudActors()                      pooled minimap contacts for `ui`:
+ *                                          [{ position, alive, friendly, heading }]
  *   ai.debugStage('firefight')             staged combat tableau for captures
  *   ai.prewarmMaterials()                  await: build + compile every character
  *                                          shader without spawning anything
@@ -69,6 +71,9 @@ export class AiSystem {
     this._variants = new Map();
     this.agents = [];
     this.squads = [];
+    /** getHudActors() scratch — reused list + record pool, never reallocated. */
+    this._hudActors = [];
+    this._hudPool = [];
     this.grid = null;
     this.cover = null;
     this.inspect = false;
@@ -321,7 +326,7 @@ export class AiSystem {
       if (!e || !e.target || !(e.target instanceof Agent)) return;
       const a = e.target;
       if (!a.alive) return;
-      const amount = e.amount * this._falloff(e.point);
+      const amount = e.amount * this._falloff(e.point, e.source);
       a.applyDamage(amount, e.headshot ? 'head' : e.part ?? 'torso', e.point ?? a.position, e.incident);
       if (!a.alive) e.killed = true;
     });
@@ -349,9 +354,12 @@ export class AiSystem {
     });
   }
 
-  _falloff(point) {
+  _falloff(point, source) {
     if (!point) return 1;
-    const p = this.playerPosition(this._v2);
+    // Range is measured from whoever fired. Only agent-on-agent rounds carry a
+    // non-player source; everything else keeps the player as the origin, which
+    // is also the fallback for payloads that predate the field.
+    const p = source instanceof Agent ? source.eye : this.playerPosition(this._v2);
     if (!p) return 1;
     const d = p.distanceTo(point);
     // full damage inside 22 m, tapering to 45 % by 70 m
@@ -611,6 +619,7 @@ export class AiSystem {
         penetration: 0.9,
         maxDist: 200,
         mask: phys.MASK.BULLET,
+        source: agent,
       });
       if (impacts.length) end = impacts[0].point;
     }
@@ -758,6 +767,33 @@ export class AiSystem {
     this._updateGrenades(dt);
     this.stats.agents = this.agents.length;
     this.stats.alive = alive;
+  }
+
+  /**
+   * Contact list for the HUD minimap — `[{ position, alive, friendly, heading }]`.
+   * Records are pooled and rewritten in place, so read them now, never stash
+   * them. `heading` is a compass bearing in degrees (0 = north = -Z), matching
+   * what `ui` derives from the camera; an agent's `yaw` faces +Z at 0.
+   */
+  getHudActors() {
+    const out = this._hudActors;
+    const pool = this._hudPool;
+    out.length = 0;
+    for (let i = 0; i < this.agents.length; i++) {
+      const a = this.agents[i];
+      if (!a.alive) continue;
+      let r = pool[out.length];
+      if (!r) {
+        r = { position: new THREE.Vector3(), alive: true, friendly: false, heading: 0 };
+        pool.push(r);
+      }
+      r.position.copy(a.position);
+      r.alive = true;
+      r.friendly = false;
+      r.heading = (Math.atan2(Math.sin(a.yaw), -Math.cos(a.yaw)) * 180) / Math.PI;
+      out.push(r);
+    }
+    return out;
   }
 
   lateUpdate() {

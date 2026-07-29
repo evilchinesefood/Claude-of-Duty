@@ -397,6 +397,9 @@ export class WeaponSystem {
       maxRange: def.maxRange,
       weapon: def,
       tracer: this.stats.fired % def.tracerEvery === 0,
+      // Attribute the round explicitly — `damage:dealt` keys kill credit,
+      // hitmarkers and range falloff off `source`.
+      source: this.player ?? (this.player = this.ctx.peek('player')),
     });
 
     // ---- feedback ----
@@ -597,7 +600,15 @@ export class WeaponSystem {
     if (this._sinceShot > 0.6) this._shotIndex = 0;
 
     // ---- gather state ----------------------------------------------------
-    const live = !input.frozen && input.enabled !== false && this.debugMode === null;
+    // `player.dead` / `controlEnabled` gate the trigger too: player freezes its
+    // own movement and look on death, but Input stays enabled, so without this
+    // the corpse kept firing through the whole respawn delay.
+    const live =
+      !input.frozen &&
+      input.enabled !== false &&
+      this.debugMode === null &&
+      player?.dead !== true &&
+      player?.controlEnabled !== false;
     st.ads = live ? input.ads || player?.adsRequested === true : this.debugMode === 'ads';
     st.sprint = live ? player?.sprinting === true && this._sinceShot > 0.3 : false;
     st.speed = player?.horizontalSpeed ?? player?.speed ?? 0;
