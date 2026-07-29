@@ -1,0 +1,128 @@
+# Serve the build-time compressed siblings produced by tools/Precompress.mjs.
+#
+# The deploy host runs Apache with mod_deflate (responses come back with an
+# ETag suffixed `-gzip`) but without mod_brotli, so a browser advertising `br`
+# was still being handed gzip. On the 1.6 MB chunk that is 489 kB instead of
+# 400 kB — 89 kB of dead weight on every cold load.
+#
+# This needs only mod_rewrite + mod_headers, so it works on stock Apache with
+# no server module to install. Every block is guarded by <IfModule>: on a host
+# missing either module the rules vanish and the uncompressed originals are
+# served exactly as before.
+#
+# There is deliberately no RewriteBase — the substitution is a bare relative
+# filename resolved against the directory holding this file, so the same rules
+# work at / or at /cod/ without editing.
+
+# The rewrite is nested INSIDE the mod_headers guard on purpose, and the nesting
+# is load-bearing. Serving `index-abc.js.br` is only correct if something also
+# sets `Content-Encoding: br`; on a host with mod_rewrite but no mod_headers the
+# rewrite would still fire, the header block would be skipped, and the browser
+# would be handed brotli bytes labelled `text/javascript` with no encoding — a
+# corrupt script and a blank page. Requiring both modules means the worst case
+# is "no rewrite, serve the original", which is exactly today's behaviour.
+<IfModule mod_headers.c>
+ <IfModule mod_env.c>
+  <IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Brotli first: better ratio, and every browser that sends `br` also sends gzip.
+    # The token test is anchored on delimiters so "brotli-x" or a filename-ish
+    # substring cannot match.
+    #
+    # The second condition is not redundant. `br;q=0` is how a client REFUSES
+    # brotli (some corporate proxies send exactly that), and it contains the
+    # token, so matching on the token alone hands those clients a body they have
+    # told us they cannot decode. q=0 and q=0.0 are refusals; q=0.5 is not.
+    RewriteCond %{HTTP:Accept-Encoding} (^|[,\s])br(\s*[,;]|$)
+    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])br\s*;\s*q=0(\.0+)?(\s*[,;]|$)
+    RewriteCond %{REQUEST_FILENAME}.br -f
+    RewriteRule ^(.+\.(?:js|mjs|css|html|json|svg|map|wasm))$ $1.br [L]
+
+    # gzip fallback, for the same reason: serving a stored -9 file beats
+    # re-running mod_deflate at its default level on every request.
+    RewriteCond %{HTTP:Accept-Encoding} (^|[,\s])gzip(\s*[,;]|$)
+    RewriteCond %{HTTP:Accept-Encoding} !(^|[,\s])gzip\s*;\s*q=0(\.0+)?(\s*[,;]|$)
+    RewriteCond %{REQUEST_FILENAME}.gz -f
+    RewriteRule ^(.+\.(?:js|mjs|css|html|json|svg|map|wasm))$ $1.gz [L]
+  </IfModule>
+ </IfModule>
+</IfModule>
+
+<IfModule mod_headers.c>
+  <FilesMatch "\.br$">
+    Header set Content-Encoding br
+    # merge, not append: Apache already emits a Vary here and appending would
+    # list Accept-Encoding twice.
+    Header merge Vary Accept-Encoding
+  </FilesMatch>
+
+  <FilesMatch "\.gz$">
+    Header set Content-Encoding gzip
+    Header merge Vary Accept-Encoding
+  </FilesMatch>
+</IfModule>
+
+# Without this mod_deflate would gzip an already-brotli'd body and the browser
+# would decode one layer and choke on the other. `no-brotli` covers the same
+# hazard if mod_brotli is ever switched on later — these files must be shipped
+# byte-for-byte, whatever compressors the host grows.
+<IfModule mod_env.c>
+  <FilesMatch "\.(br|gz)$">
+    SetEnv no-gzip 1
+    SetEnv no-brotli 1
+  </FilesMatch>
+</IfModule>
+
+# The .br/.gz extension masks the real type, so Apache would otherwise hand the
+# chunk over as application/octet-stream and the browser would refuse to run it.
+<IfModule mod_mime.c>
+  <FilesMatch "\.(js|mjs)\.(br|gz)$">
+    ForceType text/javascript
+  </FilesMatch>
+  <FilesMatch "\.css\.(br|gz)$">
+    ForceType text/css
+  </FilesMatch>
+  <FilesMatch "\.html\.(br|gz)$">
+    ForceType text/html
+  </FilesMatch>
+  <FilesMatch "\.json\.(br|gz)$">
+    ForceType application/json
+  </FilesMatch>
+  # .map is in the rewrite list above and in COMPRESSIBLE in
+  # tools/Precompress.mjs, so it needs a type here too or a sourcemap built with
+  # OW_SOURCEMAP=1 is served as octet-stream and DevTools silently ignores it.
+  <FilesMatch "\.map\.(br|gz)$">
+    ForceType application/json
+  </FilesMatch>
+  <FilesMatch "\.svg\.(br|gz)$">
+    ForceType image/svg+xml
+  </FilesMatch>
+  <FilesMatch "\.wasm\.(br|gz)$">
+    ForceType application/wasm
+  </FilesMatch>
+</IfModule>
+
+# Vite fingerprints every asset filename, so the bundle is safe to cache hard.
+# index.html must not be, or a deploy never reaches anyone.
+# `Header` is mod_headers and `ExpiresDefault` is mod_expires — they are guarded
+# separately on purpose. A bare `Header` on a host without mod_headers is a hard
+# configuration error, and Apache answers the whole directory with a 500.
+<IfModule mod_expires.c>
+  ExpiresActive On
+  <FilesMatch "\-[A-Za-z0-9_-]{8,}\.(js|mjs|css)(\.(br|gz))?$">
+    ExpiresDefault "access plus 1 year"
+  </FilesMatch>
+  <FilesMatch "\.html(\.(br|gz))?$">
+    ExpiresDefault "access plus 0 seconds"
+  </FilesMatch>
+</IfModule>
+
+<IfModule mod_headers.c>
+  <FilesMatch "\-[A-Za-z0-9_-]{8,}\.(js|mjs|css)(\.(br|gz))?$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+  <FilesMatch "\.html(\.(br|gz))?$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
